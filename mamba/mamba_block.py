@@ -14,7 +14,6 @@ class MambaBLock(nn.Module):
     # 4. SSM
     # 5. Multiply SSM output with activated res
     # 6. Linear projection on output
-    # 7. Residual connection from input
 
     def __init__(self, config):
         super().__init__()
@@ -59,10 +58,27 @@ class MambaBLock(nn.Module):
         # Linear projection on output
         out = self.output_proj(y)
 
-        # Residual connection from input
-        out = out + x_in
-
         return out
         
+class RMSNorm(nn.Module):
+    def __init__(self, d_input, eps=1e-5):
+        super().__init__()
+        self.d_model = d_input
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_input))
 
+    def forward(self, x):
+        y = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        return y
 
+class ResidualBlock(nn.Module):
+    # Wraps MambaBlock with residual connection from input and RMSNorm
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.mamba_block = MambaBLock(config)
+        self.norm = RMSNorm(config.d_input)
+
+    def forward(self, x):
+        output = self.mamba_block(self.norm(x)) + x
+        return output

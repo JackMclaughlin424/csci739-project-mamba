@@ -11,3 +11,7 @@ Class project for  CSCI 739 - Topics in Generative AI, taught by Dr Christopher 
 
 **Mamba blog article guide**
 [https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mamba-and-state?triedRedirect=true]
+
+
+## Project Setup
+

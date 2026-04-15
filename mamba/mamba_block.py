@@ -1,11 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat, einsum
+# Accelerated_scan for efficient SSM computation
+# https://github.com/proger/accelerated-scan/tree/main
+from accelerated_scan.warp import scan
 
 class MambaBLock(nn.Module):
     # Sources:
     # - https://arxiv.org/abs/2312.00752
     # - https://www.ibm.com/think/topics/mamba-model
+    # - https://arxiv.org/pdf/2111.00396
+    # - https://arxiv.org/pdf/2008.07669
 
     # Mamba Flow:
     # 1. Linear projections on input -> x and res
@@ -23,6 +29,9 @@ class MambaBLock(nn.Module):
         self.input_proj = nn.Linear(config.d_input, config.d_model, bias=config.bias)
         self.res_proj = nn.Linear(config.d_input, config.d_model, bias=config.bias)
 
+        # Linear projection on output
+        self.output_proj = nn.Linear(config.d_model, config.d_input, bias=config.bias)
+
         # Depthwise convolution on x
         self.conv1d = nn.Conv1d(
             in_channels=config.d_model,
@@ -33,9 +42,71 @@ class MambaBLock(nn.Module):
             groups=config.d_model # Depthwise convolution
         )
 
-    def SSM(self, x):
-        # TODO: Implement SSM
-        return x
+        # Input independent SSM parameters
+
+        # Matrix A: State transition matrix
+        # Initialize A with HiPPO matrix for long range dependencies
+        # Simplified to diagonal eigenvalues
+        # Each state dimension has a separate decay rate
+        A = repeat(torch.arange(1, config.d_state + 1), 'n -> d n', d=config.d_model)
+        # Logarithmic representation of A for stability and gradient flow
+        self.A_log = nn.Parameter(torch.log(A))
+
+        # Matrix D: Feedthrough matrix
+        self.D = nn.Parameter(torch.ones(config.d_model))
+
+        # Input dependent SSM parameters
+
+        # Matrix B: Input 
+        self.x_B_proj = nn.Linear(config.d_model, config.d_state, bias=False)
+
+        # Matrix C: Output
+        self.x_C_proj = nn.Linear(config.d_model, config.d_state, bias=False)
+
+        # Projects x to dt_rank
+        self.x_dt_proj = nn.Linear(config.d_model, config.dt_rank, bias=False)
+        # Projects dt to d_model
+        self.dt_proj = nn.Linear(config.dt_rank, config.d_model, bias=True)
+
+
+
+
+    def ssm(self, x):
+        batch, L, d_model = x.shape
+        d_state = self.config.d_state
+
+        # Reconstruct A from log representation, negative for stability
+        A = -torch.exp(self.A_log.float())
+
+        # Input-dependent projections
+        B_proj = self.x_B_proj(x)
+        C_proj = self.x_C_proj(x)
+        delta = F.softplus(self.dt_proj(self.x_dt_proj(x)))
+
+        # Discretization
+        # dA[b, l, d, n] = exp(delta[b, l, d] * A[d, n])
+        dA = torch.exp(einsum(delta, A, 'b l d, d n -> b l d n'))
+
+        # dBu[b, l, d, n] = delta[b, l, d] * B_proj[b, l, n] * x[b, l, d]
+        dBu = einsum(delta, B_proj, 'b l d, b l n -> b l d n') * x.unsqueeze(-1)
+
+        # Reshape for parallel scan
+        gates = rearrange(dA, 'b l d n -> b (d n) l').contiguous()
+        tokens = rearrange(dBu, 'b l d n -> b (d n) l').contiguous()
+
+        # Parallel associative scan
+        # h[t] = dA[t] * h[t-1] + dBu[t]
+        h = scan(gates, tokens)
+
+        # Reshape back
+        h = rearrange(h, 'b (d n) l -> b l d n', d=d_model, n=d_state)
+
+        # Output
+        # y[b, l, d] = sum_n C[b, l, n] * h[b, l, d, n] + D[d] * x[b, l, d]
+        y = einsum(h, C_proj, 'b l d n, b l n -> b l d')
+        y = y + x * self.D.float()
+
+        return y
 
     def forward(self, x_in):
 
@@ -43,8 +114,13 @@ class MambaBLock(nn.Module):
         x = self.input_proj(x_in)
         res = self.res_proj(x_in)
 
-        # Depthwise convolution on x
-        x = self.conv1d(x)
+        L = x.shape[1]
+
+        # Depthwise convolution
+        # Reshape to (B D L) for convolution, then back to (B L D)
+        x = rearrange(x, 'b l d -> b d l')
+        x = self.conv1d(x)[:, :, :L]  # trim causal padding to original length
+        x = rearrange(x, 'b d l -> b l d')
 
         # Activation
         x = F.silu(x)

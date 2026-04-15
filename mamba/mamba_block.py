@@ -4,9 +4,18 @@ import torch.nn.functional as F
 from einops import rearrange, repeat, einsum
 # Accelerated_scan for efficient SSM computation
 # https://github.com/proger/accelerated-scan/tree/main
-from accelerated_scan.warp import scan
+# warp  = fastest (CUDA JIT, needs nvcc)
+# scalar = Triton kernel (ships with PyTorch 2.x, no nvcc)
+# ref   = pure PyTorch fallback (CPU-safe)
+try:
+    from accelerated_scan.warp import scan
+except (ImportError, OSError):
+    try:
+        from accelerated_scan.scalar import scan
+    except (ImportError, OSError):
+        from accelerated_scan.ref import scan
 
-class MambaBLock(nn.Module):
+class MambaBlock(nn.Module):
     # Sources:
     # - https://arxiv.org/abs/2312.00752
     # - https://www.ibm.com/think/topics/mamba-model
@@ -152,7 +161,7 @@ class ResidualBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.mamba_block = MambaBLock(config)
+        self.mamba_block = MambaBlock(config)
         self.norm = RMSNorm(config.d_input)
 
     def forward(self, x):

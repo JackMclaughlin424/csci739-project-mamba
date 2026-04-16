@@ -26,6 +26,8 @@ from mamba_block import RMSNorm, ResidualBlock
 class MambaLMConfig:
     d_input: int = 768         # residual stream / embedding dimension
     d_model: int = 1536        # expanded inner dimension inside MambaBlock (typically 2x d_input)
+    d_state: int = 16          # SSM hidden state dimension
+    dt_rank: int = 48          # rank of delta projection (ceil(d_input / 16))
     n_layer: int = 24
     vocab_size: int = 50277
     kernel_size: int = 4
@@ -90,6 +92,12 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
         config_data = load_config_hf(pretrained_model_name)
+        # HuggingFace checkpoints use 'd_model' for the embedding dim; map to our naming
+        hf_to_local = {"d_model": "d_input"}
+        config_data = {hf_to_local.get(k, k): v for k, v in config_data.items()}
+        # Drop any HF fields our config doesn't know about
+        known = {f.name for f in MambaLMConfig.__dataclass_fields__.values()}
+        config_data = {k: v for k, v in config_data.items() if k in known}
         config = MambaLMConfig(**config_data)
         model = cls(config, **kwargs)
         model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))

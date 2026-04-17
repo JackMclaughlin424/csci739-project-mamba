@@ -1,19 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat, einsum
-# Accelerated_scan for efficient SSM computation
-# https://github.com/proger/accelerated-scan/tree/main
-# warp  = fastest (CUDA JIT, needs nvcc)
-# scalar = Triton kernel (ships with PyTorch 2.x, no nvcc)
-# ref   = pure PyTorch fallback (CPU-safe)
-try:
-    from accelerated_scan.warp import scan
-except (ImportError, OSError):
-    try:
-        from accelerated_scan.scalar import scan
-    except (ImportError, OSError):
-        from accelerated_scan.ref import scan
+from einops import rearrange, repeat
+from fused_scan import fused_ssm
 
 class MambaBlock(nn.Module):
     # Sources:
@@ -81,41 +70,13 @@ class MambaBlock(nn.Module):
 
 
     def ssm(self, x):
-        batch, L, d_model = x.shape
-        d_state = self.config.d_state
+        # x: (B, L, D)
+        A = -torch.exp(self.A_log.float())                        # (D, N)
+        B_proj = self.x_B_proj(x)                                 # (B, L, N)
+        C_proj = self.x_C_proj(x)                                 # (B, L, N)
+        delta  = F.softplus(self.dt_proj(self.x_dt_proj(x)))      # (B, L, D)
 
-        # Reconstruct A from log representation, negative for stability
-        A = -torch.exp(self.A_log.float())
-
-        # Input-dependent projections
-        B_proj = self.x_B_proj(x)
-        C_proj = self.x_C_proj(x)
-        delta = F.softplus(self.dt_proj(self.x_dt_proj(x)))
-
-        # Discretization
-        # dA[b, l, d, n] = exp(delta[b, l, d] * A[d, n])
-        dA = torch.exp(einsum(delta, A, 'b l d, d n -> b l d n'))
-
-        # dBu[b, l, d, n] = delta[b, l, d] * B_proj[b, l, n] * x[b, l, d]
-        dBu = einsum(delta, B_proj, 'b l d, b l n -> b l d n') * x.unsqueeze(-1)
-
-        # Reshape for parallel scan
-        gates = rearrange(dA, 'b l d n -> b (d n) l').contiguous()
-        tokens = rearrange(dBu, 'b l d n -> b (d n) l').contiguous()
-
-        # Parallel associative scan
-        # h[t] = dA[t] * h[t-1] + dBu[t]
-        h = scan(gates, tokens)
-
-        # Reshape back
-        h = rearrange(h, 'b (d n) l -> b l d n', d=d_model, n=d_state)
-
-        # Output
-        # y[b, l, d] = sum_n C[b, l, n] * h[b, l, d, n] + D[d] * x[b, l, d]
-        y = einsum(h, C_proj, 'b l d n, b l n -> b l d')
-        y = y + x * self.D.float()
-
-        return y
+        return fused_ssm(delta, A, B_proj, x, C_proj, self.D.float())
 
     def forward(self, x_in):
 

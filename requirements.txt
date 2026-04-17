@@ -1,6 +1,4 @@
 torch
 einops
-causal-conv1d
-mamba-ssm
 ninja
-accelerated-scan
+triton

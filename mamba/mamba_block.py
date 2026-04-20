@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from fused_scan import fused_ssm
+from .fused_scan import fused_ssm
 
 class MambaBlock(nn.Module):
     # Sources:

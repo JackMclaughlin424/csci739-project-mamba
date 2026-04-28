@@ -1,3 +1,7 @@
+# REFERENCE ONLY — do not import. Requires the mamba-ssm pip package.
+# This is the original mixer_seq_simple.py from state-spaces/mamba, kept
+# here as a reference for comparing against our from-scratch implementation.
+#
 # Copyright (c) 2023, Albert Gu, Tri Dao.
 
 import math

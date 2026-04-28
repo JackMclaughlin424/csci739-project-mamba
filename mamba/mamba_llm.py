@@ -27,7 +27,7 @@ class MambaLMConfig:
     d_input: int = 768         # residual stream / embedding dimension
     d_model: int = 1536        # expanded inner dimension inside MambaBlock (typically 2x d_input)
     d_state: int = 16          # SSM hidden state dimension
-    dt_rank: int = 48          # rank of delta projection (ceil(d_input / 16))
+    dt_rank: int = 0           # rank of delta projection; 0 = auto (ceil(d_input / 16))
     n_layer: int = 24
     vocab_size: int = 50277
     kernel_size: int = 4
@@ -35,6 +35,10 @@ class MambaLMConfig:
     conv_bias: bool = True
     pad_vocab_size_multiple: int = 8
     tie_embeddings: bool = True
+
+    def __post_init__(self):
+        if self.dt_rank == 0:
+            self.dt_rank = math.ceil(self.d_input / 16)
 
 
 def _init_weights(module, n_layer, initializer_range=0.02):
@@ -44,7 +48,7 @@ def _init_weights(module, n_layer, initializer_range=0.02):
     elif isinstance(module, nn.Embedding):
         nn.init.normal_(module.weight, std=initializer_range)
     for name, p in module.named_parameters():
-        if name in ["out_proj.weight", "fc2.weight"]:
+        if name in ["output_proj.weight", "fc2.weight"]:
             # GPT-2 scheme: scale residual branch weights by 1/sqrt(n_layer)
             nn.init.kaiming_uniform_(p, a=math.sqrt(5))
             with torch.no_grad():
@@ -59,10 +63,40 @@ class MixerModel(nn.Module):
         self.norm_f = RMSNorm(config.d_input)
         self.apply(partial(_init_weights, n_layer=config.n_layer))
 
-    def forward(self, input_ids):
-        x = self.embedding(input_ids)
-        for layer in self.layers:
-            x = layer(x)
+    def allocate_inference_cache(self, batch_size, max_seqlen=None, dtype=None):  # noqa: ARG002
+        dtype  = dtype or next(self.parameters()).dtype
+        device = next(self.parameters()).device
+        return {i: layer.allocate_inference_cache(batch_size, dtype, device)
+                for i, layer in enumerate(self.layers)}
+
+    def forward(self, input_ids, inference_params=None):
+        x = self.embedding(input_ids)  # (B, L, d_input)
+
+        if inference_params is not None:
+            if inference_params.seqlen_offset == 0:
+                # Prompt pass: step token-by-token to populate the cache
+                _, L, _ = x.shape
+                for i, layer in enumerate(self.layers):
+                    conv_state, ssm_state = inference_params.key_value_memory_dict[i]
+                    out_seq = []
+                    for t in range(L):
+                        xt, conv_state, ssm_state = layer.step(x[:, t, :], conv_state, ssm_state)
+                        out_seq.append(xt)
+                    inference_params.key_value_memory_dict[i] = (conv_state, ssm_state)
+                    x = torch.stack(out_seq, dim=1)
+            else:
+                # Single-token generation step
+                x = x.squeeze(1)  # (B, d_input)
+                for i, layer in enumerate(self.layers):
+                    conv_state, ssm_state = inference_params.key_value_memory_dict[i]
+                    x, conv_state, ssm_state = layer.step(x, conv_state, ssm_state)
+                    inference_params.key_value_memory_dict[i] = (conv_state, ssm_state)
+                x = x.unsqueeze(1)  # (B, 1, d_input)
+        else:
+            # Training: fast parallel scan
+            for layer in self.layers:
+                x = layer(x)
+
         return self.norm_f(x)
 
 
@@ -81,8 +115,11 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         if self.config.tie_embeddings:
             self.lm_head.weight = self.backbone.embedding.weight
 
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None):
+        return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype)
+
     def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0):
-        hidden_states = self.backbone(input_ids)
+        hidden_states = self.backbone(input_ids, inference_params=inference_params)
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)

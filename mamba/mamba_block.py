@@ -69,6 +69,13 @@ class MambaBlock(nn.Module):
 
 
 
+    def allocate_inference_cache(self, batch_size, dtype, device):
+        conv_state = torch.zeros(batch_size, self.config.d_model, self.config.kernel_size,
+                                 dtype=dtype, device=device)
+        ssm_state  = torch.zeros(batch_size, self.config.d_model, self.config.d_state,
+                                 dtype=torch.float32, device=device)
+        return conv_state, ssm_state
+
     def ssm(self, x):
         # x: (B, L, D)
         A = -torch.exp(self.A_log.float())                        # (D, N)
@@ -77,6 +84,47 @@ class MambaBlock(nn.Module):
         delta  = F.softplus(self.dt_proj(self.x_dt_proj(x)))      # (B, L, D)
 
         return fused_ssm(delta, A, B_proj, x, C_proj, self.D.float())
+
+    def step(self, x_in, conv_state, ssm_state):
+        """Single-token recurrent step for O(1) autoregressive inference.
+
+        Args:
+            x_in:       (B, d_input)
+            conv_state: (B, d_model, kernel_size)  — sliding conv buffer
+            ssm_state:  (B, d_model, d_state)      — current SSM hidden state (fp32)
+        Returns:
+            out, conv_state, ssm_state
+        """
+        x   = self.input_proj(x_in)   # (B, d_model)
+        res = self.res_proj(x_in)     # (B, d_model)
+
+        # Causal conv: shift buffer left, insert new token at the end
+        conv_state = torch.roll(conv_state, shifts=-1, dims=-1)
+        conv_state[:, :, -1] = x
+        x_conv = (conv_state * self.conv1d.weight[:, 0, :]).sum(-1)
+        if self.conv1d.bias is not None:
+            x_conv = x_conv + self.conv1d.bias
+        x_conv = F.silu(x_conv)
+
+        # Input-dependent projections
+        B_proj = self.x_B_proj(x_conv)                             # (B, d_state)
+        C_proj = self.x_C_proj(x_conv)                             # (B, d_state)
+        dt     = F.softplus(self.dt_proj(self.x_dt_proj(x_conv)))  # (B, d_model)
+
+        # Discretize + SSM update in fp32 for numerical stability
+        A   = -torch.exp(self.A_log.float())                        # (d_model, d_state)
+        dA  = torch.exp(dt.float().unsqueeze(-1) * A)               # (B, d_model, d_state)
+        dBu = (dt.float().unsqueeze(-1)
+               * B_proj.float().unsqueeze(1)
+               * x_conv.float().unsqueeze(-1))                      # (B, d_model, d_state)
+        ssm_state = dA * ssm_state + dBu
+
+        # Output: C·h + D·x, cast back to input dtype
+        y = ((ssm_state.to(x_conv.dtype) * C_proj.unsqueeze(1)).sum(-1)
+             + self.D * x_conv)                                     # (B, d_model)
+        y = y * F.silu(res)
+
+        return self.output_proj(y), conv_state, ssm_state
 
     def forward(self, x_in):
 
@@ -124,6 +172,13 @@ class ResidualBlock(nn.Module):
         self.config = config
         self.mamba_block = MambaBlock(config)
         self.norm = RMSNorm(config.d_input)
+
+    def allocate_inference_cache(self, batch_size, dtype, device):
+        return self.mamba_block.allocate_inference_cache(batch_size, dtype, device)
+
+    def step(self, x, conv_state, ssm_state):
+        out, conv_state, ssm_state = self.mamba_block.step(self.norm(x), conv_state, ssm_state)
+        return out + x, conv_state, ssm_state
 
     def forward(self, x):
         output = self.mamba_block(self.norm(x)) + x

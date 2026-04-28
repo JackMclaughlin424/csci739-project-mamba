@@ -2,3 +2,10 @@ torch
 einops
 ninja
 triton
+transformers
+datasets
+wandb
+tqdm
+matplotlib
+numpy
+tokenizers

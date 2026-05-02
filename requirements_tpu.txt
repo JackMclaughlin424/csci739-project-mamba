@@ -1,0 +1,30 @@
+# Mamba LM training on Google Cloud TPU v4 / v6e
+#
+# Install with:
+#     pip install -r requirements_tpu.txt
+#
+# Excludes everything from requirements.txt that's not needed for training:
+#   - triton, ninja        (GPU-only Triton kernels — TPU uses xla_fused_scan)
+#   - matplotlib, numpy    (notebooks only — no plotting in tpu_train.py)
+#
+# torch and torch_xla versions MUST match exactly (xla_tpu_reference §11.4).
+
+# ── libtpu wheel index (provides the TPU runtime for torch_xla[tpu]) ─────────
+--find-links https://storage.googleapis.com/libtpu-releases/index.html
+
+# ── Core: PyTorch + XLA backend with libtpu ──────────────────────────────────
+torch~=2.9.0
+torch_xla[tpu]~=2.9.0
+
+# ── Model dependencies ───────────────────────────────────────────────────────
+einops               # rearrange / repeat in MambaBlockTPU
+
+# ── HuggingFace data pipeline (SimpleStories corpus + tokenizer) ────────────
+datasets>=3.0        # load_dataset("lennart-finke/SimpleStories")
+transformers>=4.40   # AutoTokenizer.from_pretrained("SimpleStories/SimpleStories-5M")
+tokenizers>=0.20     # transformers tokenizer backend
+
+# ── Training observability ───────────────────────────────────────────────────
+wandb>=0.18          # 0.16+ has TPU system-asset detection
+tpu-info             # required by wandb to collect TPU duty cycle / HBM metrics
+tqdm                 # tokenization progress bar

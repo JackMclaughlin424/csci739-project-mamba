@@ -125,6 +125,109 @@ from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Tier 1/2 metric helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LOG2_E = 1.0 / math.log(2.0)   # nats → bits multiplier
+
+
+def _bits_per_byte(loss_nats: float, bytes_per_token: float) -> float:
+    """Convert per-token cross-entropy (nats) to per-byte bits.
+
+    bpb = (nats/token) × (bits/nat) × (token/byte)
+        = loss_nats × log2(e) / bytes_per_token
+
+    Universal cross-tokenizer axis — different vocabularies all collapse
+    onto the same scale.
+    """
+    if bytes_per_token <= 0 or not math.isfinite(loss_nats):
+        return float("nan")
+    return loss_nats * _LOG2_E / bytes_per_token
+
+
+def _mfu(flops_per_sec: float, peak_flops_per_device: float, world_size: int) -> float:
+    """Model FLOPs Utilization — actual / theoretical-peak.
+
+    Returns NaN when peak is unset (0). On v4-8: world_size=8, peak per device
+    is per TensorCore. On v6e-N: peak per device is per chip.
+    """
+    if peak_flops_per_device <= 0:
+        return float("nan")
+    total_peak = peak_flops_per_device * max(world_size, 1)
+    return flops_per_sec / total_peak
+
+
+def _param_norm_l2(model) -> torch.Tensor:
+    """Total L2 norm of all model parameters (on-device scalar)."""
+    return torch.sqrt(
+        torch.stack([
+            p.detach().float().pow(2).sum()
+            for p in model.parameters()
+            if p.requires_grad
+        ]).sum()
+    )
+
+
+def _topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, k: int) -> torch.Tensor:
+    """Mean top-k accuracy over (B*L) positions.
+
+    logits:  (B*L, V)
+    targets: (B*L,)
+    Returns scalar in [0, 1].
+    """
+    topk = logits.topk(k, dim=-1).indices              # (B*L, k)
+    return (topk == targets.unsqueeze(-1)).any(-1).float().mean()
+
+
+@torch.no_grad()
+def _generate_sample(model, tokenizer, prompt: str, *,
+                     max_new_tokens: int, temperature: float, top_k: int,
+                     device, eos_id: int):
+    """Greedy-ish autoregressive sample using model.step() (O(1) per token).
+
+    Master-only; uses .item() per generated token at the end (single .cpu()).
+    Acceptable cost since sampling is end-of-epoch only.
+    """
+    model.eval()
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    if not ids:
+        ids = [eos_id]
+    prompt_tensor = torch.tensor(ids, dtype=torch.long, device=device)
+
+    # Allocate per-layer caches.
+    caches = model.allocate_inference_cache(
+        batch_size=1, dtype=torch.float32, device=device,
+    )
+
+    # Prefill: feed each prompt token through model.step (single fixed-shape graph).
+    for tok_id in prompt_tensor:
+        _, caches = model.step(tok_id.unsqueeze(0), caches)
+
+    # Generate.
+    new_tokens = []
+    next_token = prompt_tensor[-1].unsqueeze(0)
+    for _ in range(max_new_tokens):
+        logits, caches = model.step(next_token, caches)
+        logits = logits / max(temperature, 1e-6)
+        if top_k:
+            v, _ix = torch.topk(logits, k=min(top_k, logits.shape[-1]))
+            logits = torch.where(
+                logits < v[:, [-1]],
+                torch.full_like(logits, float("-inf")),
+                logits,
+            )
+        probs = F.softmax(logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        new_tokens.append(next_token)
+        if int(next_token.item()) == eos_id:        # one .item() per generated tok
+            break
+
+    model.train()
+    all_ids = ids + [int(t.item()) for t in new_tokens]
+    return tokenizer.decode(all_ids, skip_special_tokens=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FLOP accounting (Mamba-exact analytic estimate)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -231,13 +334,17 @@ def _tokenize_and_cache(args, cache_path: str):
 
     print(f"Tokenizing {len(ds):,} stories...", flush=True)
     stream = []
+    total_bytes = 0
     for ex in tqdm(ds, desc="tokenize", unit="story"):
         text = ex[args.text_column]
+        total_bytes += len(text.encode("utf-8"))
         ids = tok.encode(text, add_special_tokens=False)
         stream.extend(ids)
         stream.append(eos)
     n_tokens = len(stream)
-    print(f"  ↳ {n_tokens:,} tokens  (vocab={vocab_size})", flush=True)
+    bytes_per_token = total_bytes / max(n_tokens, 1)
+    print(f"  ↳ {n_tokens:,} tokens  (vocab={vocab_size}, "
+          f"{bytes_per_token:.3f} bytes/token)", flush=True)
 
     data = torch.tensor(stream, dtype=torch.int32)
 
@@ -246,12 +353,15 @@ def _tokenize_and_cache(args, cache_path: str):
     train, val = data[:split], data[split:]
 
     cache_obj = {
-        "train":      train,
-        "val":        val,
-        "vocab_size": vocab_size,
-        "eos_id":     eos,
-        "tokenizer":  args.tokenizer_name,
-        "dataset":    args.dataset_name,
+        "train":           train,
+        "val":             val,
+        "vocab_size":      vocab_size,
+        "eos_id":          eos,
+        "bytes_per_token": bytes_per_token,
+        "total_bytes":     total_bytes,
+        "tokenizer":       args.tokenizer_name,
+        "dataset":         args.dataset_name,
+        "schema_version":  2,
     }
     tmp_path = cache_path + ".tmp"
     torch.save(cache_obj, tmp_path)
@@ -274,7 +384,9 @@ def prepare_dataset(args, is_master: bool, world_size: int):
         xm.rendezvous("dataset_ready")
 
     obj = torch.load(cache_path, map_location="cpu", weights_only=False)
-    return obj["train"], obj["val"], obj["vocab_size"], obj["eos_id"]
+    # Backward-compat: schema v1 caches lacked bytes_per_token.
+    bytes_per_token = obj.get("bytes_per_token", None)
+    return obj["train"], obj["val"], obj["vocab_size"], obj["eos_id"], bytes_per_token
 
 
 class TokenStreamDataset(Dataset):
@@ -333,11 +445,17 @@ def train(args, rank: int = 0):
     torch.manual_seed(args.seed + rank)
 
     # ── Data ───────────────────────────────────────────────────────────────
-    train_data, val_data, vocab_size, eos_id = prepare_dataset(
+    train_data, val_data, vocab_size, eos_id, bytes_per_token = prepare_dataset(
         args, is_master=is_master, world_size=world_size,
     )
+    if bytes_per_token is None:
+        # Old cache without byte stats: estimate from a sample of train_data.
+        # Won't be perfectly accurate but lets bits/byte stay populated.
+        bytes_per_token = 4.0    # SimpleStories rough average — overridden once retokenised
+        log(f"WARNING: cache lacks bytes_per_token; assuming {bytes_per_token}. "
+            f"Delete the cache to retokenise for accurate bits/byte.")
     log(f"Tokens: train={len(train_data):,}  val={len(val_data):,}  "
-        f"vocab={vocab_size}  eos={eos_id}")
+        f"vocab={vocab_size}  eos={eos_id}  bytes/token={bytes_per_token:.3f}")
 
     train_ds = TokenStreamDataset(train_data, args.seq_len)
     val_ds   = TokenStreamDataset(val_data,   args.seq_len)
@@ -489,6 +607,10 @@ def train(args, rank: int = 0):
     best_val = float("inf")
     best_val_ppl = float("inf")
     crashed = False
+    # Track most recent train avg loss for the val/overfit_gap metric.
+    last_train_loss_avg = float("nan")
+    # Lazily-loaded tokenizer for end-of-epoch sample generation.
+    sample_tok = None
 
     try:
         for epoch in range(args.epochs):
@@ -534,21 +656,22 @@ def train(args, rank: int = 0):
                 scheduler.step()
 
                 # Diagnostics computed EVERY step (don't conditionalise — would
-                # produce two distinct XLA graphs; see §9.4). Perplexity is
-                # computed on-device with a clamp so the exp() is stable; this
-                # is a single elementwise op so it adds essentially nothing to
-                # the graph cost and avoids a host-side exp at log time.
+                # produce two distinct XLA graphs; see §9.4). Perplexity and
+                # param_norm are computed on-device — they're cheap enough that
+                # always-on costs less than two compiled graph variants.
                 current_lr = torch.tensor(
                     scheduler.get_last_lr()[0], device=device, dtype=torch.float32,
                 )
                 safe_loss_d = safe_loss.detach().float()
                 ppl_d       = torch.exp(torch.clamp(safe_loss_d, max=20.0))
+                param_norm  = _param_norm_l2(model)         # on-device scalar
                 log_buf.append(torch.stack([
                     safe_loss_d,
                     grad_norm.detach().float(),
                     (~is_finite).float().detach(),
                     current_lr,
                     ppl_d,
+                    param_norm,
                 ]))
 
                 global_step += 1
@@ -567,8 +690,17 @@ def train(args, rank: int = 0):
                         delta    = now - t_last_log
                         t_last_log = now
                         tok_done = global_step * args.batch_size * args.seq_len * world_size
-                        tok_per_sec  = tok_done / max(elapsed, 1e-6)
-                        step_time_ms = (delta / max(args.log_interval, 1)) * 1000.0
+                        # Instantaneous throughput (tokens processed in the
+                        # just-completed log_interval window). Use this — NOT
+                        # the cumulative tok_done/elapsed — as the primary
+                        # perf metric, otherwise startup overhead (XLA compile,
+                        # first-batch warmup, dataloader fill) pollutes every
+                        # subsequent reading and you see a misleading
+                        # logarithmic ramp instead of a steady-state value.
+                        tok_window      = args.log_interval * args.batch_size * args.seq_len * world_size
+                        tok_per_sec     = tok_window / max(delta, 1e-6)
+                        tok_per_sec_avg = tok_done / max(elapsed, 1e-6)
+                        step_time_ms    = (delta / max(args.log_interval, 1)) * 1000.0
                         print(
                             f"epoch {epoch+1}/{args.epochs}  "
                             f"step {global_step:>6d}/{total_steps}  "
@@ -576,38 +708,59 @@ def train(args, rank: int = 0):
                             f"ppl {math.exp(min(last[0], 20)):.2f})  "
                             f"|grad| {last[1]:.3f}  nan {int(last[2])}  "
                             f"lr {last[3]:.2e}  "
-                            f"{tok_per_sec / 1000:.1f}k tok/s",
+                            f"{tok_per_sec / 1000:.1f}k tok/s "
+                            f"(avg {tok_per_sec_avg / 1000:.1f}k)",
                             flush=True,
                         )
 
+                        # Track for val/overfit_gap regardless of wandb.
+                        last_train_loss_avg = avg_loss
+
                         if wandb_enabled:
-                            # Cumulative training-budget metrics. We log BOTH the
-                            # Chinchilla 6N approximation (cross-arch comparison
-                            # baseline) AND the Mamba-exact analytic count (which
-                            # captures SSM-specific work the 6N rule omits).
+                            # Cumulative training-budget metrics.
                             flops_seen_6n     = 6.0 * num_params_non_embed * tok_done
                             flops_seen_exact  = flops_train_per_token * tok_done
                             tokens_per_param  = tok_done / max(num_params_non_embed, 1)
+                            # Tier-1 metrics
+                            bpb_train         = _bits_per_byte(avg_loss, bytes_per_token)
+                            flops_per_sec_exact_inst = flops_train_per_token * tok_per_sec
+                            mfu_inst          = _mfu(flops_per_sec_exact_inst,
+                                                     args.peak_flops_per_device, world_size)
+                            # Tier-2 metrics — pull param_norm out of the on-device stack
+                            param_norm_v      = last[5]
+                            update_norm_ratio = (last[3] * last[1] / max(param_norm_v, 1e-12))
                             try:
                                 wandb.log(
                                     {
+                                        # ── Loss family ──
                                         "train/loss":              last[0],
                                         "train/loss_avg_window":   avg_loss,
                                         "train/perplexity":        last[4],
+                                        "train/loss_bits_per_byte": bpb_train,
+                                        # ── Optimiser dynamics ──
                                         "train/grad_norm":         last[1],
+                                        "train/param_norm_l2":     param_norm_v,
+                                        "train/update_norm_ratio": update_norm_ratio,
                                         "train/nan_count":         int(last[2]),
                                         "train/lr":                last[3],
+                                        # ── Step counters ──
                                         "train/global_step":       global_step,
                                         "train/epoch":             epoch + 1,
                                         "train/tokens_seen":       tok_done,
                                         "train/tokens_per_param":  tokens_per_param,
                                         "train/flops_seen":        flops_seen_6n,
                                         "train/flops_seen_exact":  flops_seen_exact,
-                                        "perf/tokens_per_sec":     tok_per_sec,
-                                        "perf/flops_per_sec":      6.0 * num_params_non_embed * tok_per_sec,
-                                        "perf/flops_per_sec_exact": flops_train_per_token * tok_per_sec,
-                                        "perf/step_time_ms":       step_time_ms,
-                                        "perf/wall_clock_seconds": elapsed,
+                                        # ── Instantaneous perf ──
+                                        "perf/tokens_per_sec":         tok_per_sec,
+                                        "perf/flops_per_sec":          6.0 * num_params_non_embed * tok_per_sec,
+                                        "perf/flops_per_sec_exact":    flops_per_sec_exact_inst,
+                                        "perf/mfu":                    mfu_inst,
+                                        "perf/step_time_ms":           step_time_ms,
+                                        # ── Cumulative averages (whole-run) ──
+                                        "perf/tokens_per_sec_avg":     tok_per_sec_avg,
+                                        "perf/flops_per_sec_avg":      6.0 * num_params_non_embed * tok_per_sec_avg,
+                                        "perf/flops_per_sec_avg_exact": flops_train_per_token * tok_per_sec_avg,
+                                        "perf/wall_clock_seconds":     elapsed,
                                     },
                                     step=global_step,
                                 )
@@ -616,12 +769,20 @@ def train(args, rank: int = 0):
                                 print(f"  ↳ wandb.log failed: {e!r}", flush=True)
 
             # ── End-of-epoch validation ────────────────────────────────────
-            val_loss = evaluate(model, val_iter_loader, pad_vocab,
+            eval_out = evaluate(model, val_iter_loader, pad_vocab,
                                 device, max_batches=args.eval_batches,
                                 autocast_ctx=autocast_ctx)
-            val_ppl = math.exp(min(val_loss, 20)) if math.isfinite(val_loss) else float("nan")
+            val_loss = eval_out["loss"]
+            val_top1 = eval_out["top1"]
+            val_top5 = eval_out["top5"]
+            val_ppl  = math.exp(min(val_loss, 20)) if math.isfinite(val_loss) else float("nan")
+            val_bpb  = _bits_per_byte(val_loss, bytes_per_token)
+            overfit_gap = (val_loss - last_train_loss_avg
+                           if math.isfinite(last_train_loss_avg) else float("nan"))
             log(f"─── epoch {epoch+1} done   val_loss {val_loss:.4f}   "
-                f"val_ppl {val_ppl:.2f} ───")
+                f"val_ppl {val_ppl:.2f}   bpb {val_bpb:.4f}   "
+                f"top1 {val_top1*100:.1f}%   top5 {val_top5*100:.1f}%   "
+                f"overfit_gap {overfit_gap:+.4f} ───")
 
             # Save best-so-far checkpoint (master only).
             new_best = val_loss < best_val
@@ -640,18 +801,24 @@ def train(args, rank: int = 0):
                 best_val_ppl = val_ppl
 
             if wandb_enabled:
-                # Re-log cumulative budget axes at val time so we can plot
-                # val/loss against tokens_seen / flops_seen directly in wandb.
                 tok_done_ep         = global_step * args.batch_size * args.seq_len * world_size
                 flops_seen_6n_ep    = 6.0 * num_params_non_embed * tok_done_ep
                 flops_seen_exact_ep = flops_train_per_token * tok_done_ep
                 try:
                     wandb.log(
                         {
+                            # ── Loss family ──
                             "val/loss":              val_loss,
                             "val/perplexity":        val_ppl,
+                            "val/loss_bits_per_byte": val_bpb,
                             "val/best_loss":         best_val,
                             "val/best_perplexity":   best_val_ppl,
+                            # ── Tier-1: train/val gap ──
+                            "val/overfit_gap":       overfit_gap,
+                            # ── Tier-2: accuracies ──
+                            "val/top1_accuracy":     val_top1,
+                            "val/top5_accuracy":     val_top5,
+                            # ── Budget axes (so val/loss is plottable vs tokens) ──
                             "val/tokens_seen":       tok_done_ep,
                             "val/flops_seen":        flops_seen_6n_ep,
                             "val/flops_seen_exact":  flops_seen_exact_ep,
@@ -661,6 +828,42 @@ def train(args, rank: int = 0):
                     )
                 except Exception as e:
                     print(f"  ↳ wandb.log (val) failed: {e!r}", flush=True)
+
+            # ── Sample text generation (master only, end-of-epoch) ─────────
+            if (is_master and args.sample_every_n_epochs > 0
+                    and (epoch + 1) % args.sample_every_n_epochs == 0
+                    and HAS_TRANSFORMERS):
+                if sample_tok is None:
+                    try:
+                        sample_tok = AutoTokenizer.from_pretrained(args.tokenizer_name)
+                    except Exception as e:
+                        log(f"  ↳ failed to load tokenizer for sampling: {e!r}")
+                        sample_tok = False    # don't try again
+                if sample_tok:
+                    samples = []
+                    for prompt in args.sample_prompts:
+                        try:
+                            txt = _generate_sample(
+                                model, sample_tok, prompt,
+                                max_new_tokens=args.sample_max_new_tokens,
+                                temperature=args.sample_temperature,
+                                top_k=args.sample_top_k,
+                                device=device, eos_id=eos_id,
+                            )
+                            samples.append((prompt, txt))
+                        except Exception as e:
+                            log(f"  ↳ sample for {prompt!r} failed: {e!r}")
+                    if samples:
+                        for prompt, txt in samples:
+                            log(f"  ✏  [{prompt!r}] → {txt!r}")
+                        if wandb_enabled:
+                            try:
+                                table = wandb.Table(columns=["epoch", "prompt", "generation"])
+                                for prompt, txt in samples:
+                                    table.add_data(epoch + 1, prompt, txt)
+                                wandb.log({"samples/text": table}, step=global_step)
+                            except Exception as e:
+                                print(f"  ↳ wandb sample table log failed: {e!r}", flush=True)
 
         # ── Final checkpoint (master only) ─────────────────────────────────
         if args.save_path and is_master:
@@ -733,10 +936,15 @@ def _save_checkpoint(model, cfg, args, path, extra=None,
 
 @torch.no_grad()
 def evaluate(model, val_loader, pad_vocab, device,
-             max_batches: int = 50, autocast_ctx=None) -> float:
-    """Mean cross-entropy over up to `max_batches`. All-reduces if multi-device."""
+             max_batches: int = 50, autocast_ctx=None) -> dict:
+    """Mean cross-entropy + top-1 / top-5 accuracy over up to `max_batches`.
+
+    All metrics computed on-device, all_reduced once across world if multi-device,
+    then a SINGLE .cpu() transfer for all three values.
+    Returns: {"loss": float, "top1": float, "top5": float}.
+    """
     model.eval()
-    losses = []
+    losses, top1s, top5s = [], [], []
     autocast_ctx = autocast_ctx or _nullcontext()
     for i, (x, y) in enumerate(val_loader):
         if i >= max_batches:
@@ -747,17 +955,26 @@ def evaluate(model, val_loader, pad_vocab, device,
         x = x.long(); y = y.long()
         with autocast_ctx:
             logits = model(x)
-            loss = F.cross_entropy(logits.view(-1, pad_vocab), y.view(-1))
+            flat_logits = logits.view(-1, pad_vocab)
+            flat_targets = y.view(-1)
+            loss = F.cross_entropy(flat_logits, flat_targets)
         losses.append(loss.float())
+        top1s.append(_topk_accuracy(flat_logits.float(), flat_targets, k=1))
+        top5s.append(_topk_accuracy(flat_logits.float(), flat_targets, k=5))
     if not losses:
         model.train()
-        return float("nan")
-    avg = torch.stack(losses).mean()
+        return {"loss": float("nan"), "top1": float("nan"), "top5": float("nan")}
+    avg_loss = torch.stack(losses).mean()
+    avg_top1 = torch.stack(top1s).mean()
+    avg_top5 = torch.stack(top5s).mean()
     if HAS_XLA and _xla_world_size() > 1:
-        avg = xm.all_reduce(xm.REDUCE_SUM, avg) / _xla_world_size()
-    val = avg.cpu().item()
+        avg_loss = xm.all_reduce(xm.REDUCE_SUM, avg_loss) / _xla_world_size()
+        avg_top1 = xm.all_reduce(xm.REDUCE_SUM, avg_top1) / _xla_world_size()
+        avg_top5 = xm.all_reduce(xm.REDUCE_SUM, avg_top5) / _xla_world_size()
+    # SINGLE .cpu() across all three scalars (xla_tpu_reference §2.2).
+    triplet = torch.stack([avg_loss, avg_top1, avg_top5]).cpu().tolist()
     model.train()
-    return val
+    return {"loss": triplet[0], "top1": triplet[1], "top5": triplet[2]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -823,6 +1040,27 @@ def main():
                         help="Gradient checkpointing on each ResidualBlock")
     parser.add_argument("--bf16", action="store_true",
                         help="Forward in bfloat16 autocast (cross_entropy stays fp32)")
+
+    # ── Hardware peak FLOPs (for MFU computation) ──────────────────────────
+    # Defaults assume bf16 with fp32 accumulation. Per *logical XLA device*,
+    # which on v4 is one TensorCore (half-chip = 137.5 TFLOPs/s peak) and on
+    # v6e is one chip (~459 TFLOPs/s peak). Pass 0 to disable MFU logging.
+    parser.add_argument("--peak_flops_per_device", type=float, default=0.0,
+                        help="Peak FLOPs/s per logical XLA device. "
+                             "TPU v4 TensorCore bf16 ≈ 1.375e14, "
+                             "v6e chip bf16 ≈ 4.59e14. 0 disables MFU.")
+
+    # ── Sample generation at end of epoch (qualitative monitoring) ─────────
+    parser.add_argument("--sample_every_n_epochs", type=int, default=1,
+                        help="Generate text samples every N epochs. 0 disables.")
+    parser.add_argument("--sample_max_new_tokens", type=int, default=200)
+    parser.add_argument("--sample_top_k",          type=int, default=40)
+    parser.add_argument("--sample_temperature",    type=float, default=0.8)
+    parser.add_argument("--sample_prompts", nargs="+", default=[
+        "Once upon a time, ",
+        "There was a little girl named",
+        "The dog ran",
+    ])
 
     # ── I/O & parallelism ──────────────────────────────────────────────────
     parser.add_argument("--save_path", default="mamba_simplestories_5m.pt")

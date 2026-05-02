@@ -70,10 +70,29 @@ try:
     import torch_xla.debug.metrics as met
     from torch_xla.amp.syncfree import AdamW as SyncfreeAdamW
     HAS_XLA = True
+
+    # ── API compatibility shims ────────────────────────────────────────────
+    # torch_xla 2.5+ removed `xm.xrt_world_size`, `xm.is_master_ordinal`, and
+    # deprecated `xm.xla_device` in favour of the `torch_xla.runtime` namespace
+    # and the top-level `torch_xla.device()`. Older releases (≤2.4) only have
+    # the `xm.*` API. Resolve once here so the rest of the file is version-clean.
+    try:
+        import torch_xla.runtime as xr
+        import torch_xla as _txla
+        _xla_world_size    = xr.world_size
+        _xla_process_index = xr.process_index
+        _xla_is_master     = lambda: xr.process_index() == 0
+        _xla_device        = _txla.device
+    except (ImportError, AttributeError):
+        _xla_world_size    = xm.xrt_world_size
+        _xla_process_index = xm.get_ordinal
+        _xla_is_master     = xm.is_master_ordinal
+        _xla_device        = xm.xla_device
 except ImportError:
     HAS_XLA = False
     SyncfreeAdamW = torch.optim.AdamW
     xm = met = pl = None  # type: ignore
+    _xla_world_size = _xla_process_index = _xla_is_master = _xla_device = None  # type: ignore
 
 # ─── Optional dependencies for HF data loading ───────────────────────────────
 try:
@@ -284,9 +303,9 @@ def train(args, rank: int = 0):
 
     # ── Device & master ────────────────────────────────────────────────────
     if HAS_XLA:
-        device = xm.xla_device()
-        is_master = xm.is_master_ordinal()
-        world_size = xm.xrt_world_size()
+        device     = _xla_device()
+        is_master  = _xla_is_master()
+        world_size = _xla_world_size()
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         is_master = True
@@ -734,8 +753,8 @@ def evaluate(model, val_loader, pad_vocab, device,
         model.train()
         return float("nan")
     avg = torch.stack(losses).mean()
-    if HAS_XLA and xm.xrt_world_size() > 1:
-        avg = xm.all_reduce(xm.REDUCE_SUM, avg) / xm.xrt_world_size()
+    if HAS_XLA and _xla_world_size() > 1:
+        avg = xm.all_reduce(xm.REDUCE_SUM, avg) / _xla_world_size()
     val = avg.cpu().item()
     model.train()
     return val

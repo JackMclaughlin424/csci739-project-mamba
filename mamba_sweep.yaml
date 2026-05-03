@@ -1,0 +1,99 @@
+# mamba_sweep.yaml — Mamba 5M hyperparameter sweep on TPU
+#
+# Bayesian search over the optimisation hyperparameters that matter most
+# (lr, weight decay, grad clip) plus two SSM-specific levers (d_state,
+# dt_rank) that change parameter count only marginally — n_layer and
+# d_model are deliberately fixed to keep the param budget at ~5M so the
+# comparison against the SimpleStories-5M transformer remains apples-to-
+# apples. Run a separate architecture sweep if you want to vary those.
+#
+# ── Usage ────────────────────────────────────────────────────────────────
+# 1. Register the sweep (returns a sweep id like `entity/project/abc123`):
+#        wandb sweep mamba_sweep.yaml
+#
+# 2. Launch one or more agents (one per TPU host you have available):
+#        wandb agent <entity>/<project>/<sweep_id>
+#
+#    Each agent picks a config from wandb's Bayesian planner, runs ONE
+#    trial, reports val/loss back, and loops until told to stop or until
+#    the sweep is killed.
+#
+# ── Trial budget ─────────────────────────────────────────────────────────
+# Each trial caps at --max_tokens 2e8 (~200M tokens, ~10% of the full
+# 2B-token SimpleStories budget). On TPU v4-8 with --bf16 and --checkpoint
+# this is roughly 10–15 minutes per trial. Promote the winning config to a
+# full 2B-token run separately (set --max_tokens 2000000000).
+#
+# ── Early termination ────────────────────────────────────────────────────
+# Hyperband kills under-performing runs once their val/loss is clearly
+# worse than the median. Requires --val_every_n_steps to be small enough
+# that hyperband sees several val readings within `min_iter` steps. With
+# val_every_n_steps=200 and min_iter=400 each trial gets at least 2 val
+# checkpoints before becoming eligible for early termination.
+
+program: tpu_train.py
+method: bayes
+name: mamba-5m-bayes-sweep
+description: |
+  Bayesian hyperparameter sweep for the param-matched (~5M) Mamba LM
+  on the SimpleStories corpus. Trials use a 200M-token budget. Promote
+  the best config to a full 2B-token training run separately.
+
+metric:
+  name: val/loss
+  goal: minimize
+
+# Hyperband: at each rung, kill the bottom (1 - 1/eta) fraction of runs.
+# `s` controls how many rungs (more rungs = more aggressive pruning).
+early_terminate:
+  type: hyperband
+  min_iter: 400          # earliest step at which hyperband can prune
+  eta: 3                 # keep top 1/eta of runs at each rung
+  s: 2                   # number of rungs
+
+# Wandb appends `--lr=X --weight_decay=Y ...` for each trial via ${args};
+# anything before that block applies to every trial unchanged.
+command:
+  - ${env}
+  - python
+  - ${program}
+  - --multi_device                            # one process per TPU core
+  - --bf16                                    # bf16 autocast forward
+  - --checkpoint                              # XLA grad checkpointing per block
+  - --max_tokens=200000000                    # 200M tok per trial (~10% of full)
+  - --warmup_steps=200                        # match SimpleStories warmup ratio
+  - --log_interval=20
+  - --val_every_n_steps=200                   # frequent val for hyperband signal
+  - --val_every_n_batches=20                  # cheap intermediate val
+  - --eval_batches=50                         # full final val on budget hit
+  - --sample_every_n_epochs=0                 # no sampling during sweep trials
+  - --no_tokens_artifact                      # avoid race-uploading from N agents
+  - --wandb_project=mamba-simplestories-sweep
+  - --wandb_tags
+  - sweep
+  - 5m
+  - bayes
+  - ${args}
+
+parameters:
+  # ── Optimisation knobs (the main targets of the sweep) ────────────────
+  lr:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 1.0e-3
+  weight_decay:
+    distribution: uniform
+    min: 0.0
+    max: 0.2
+  grad_clip:
+    values: [0.5, 1.0, 2.0]
+
+  # ── SSM-specific levers (small param-count effect — kept in budget) ───
+  # d_state and dt_rank scale the projections that touch the SSM internal
+  # state. Their cost is O(D · N) and O(D · R) respectively, both tiny
+  # relative to the input/output projections, so varying them keeps the
+  # model within ±2% of the 5M budget.
+  d_state:
+    values: [8, 16, 32]
+  dt_rank:
+    values: [8, 16, 32]

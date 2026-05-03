@@ -125,6 +125,113 @@ from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# wandb artifact helpers — cache the tokenized corpus across runs
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _slugify(s: str) -> str:
+    """wandb artifact names allow [A-Za-z0-9._-]; replace everything else."""
+    out = []
+    for c in s:
+        out.append(c if (c.isalnum() or c in "._-") else "-")
+    return "".join(out).strip("-").lower() or "x"
+
+
+def _tokens_artifact_name(args) -> str:
+    """Auto-derived artifact name; stable for a given (dataset, tokenizer, case, seq_len, n)."""
+    if args.tokens_artifact:
+        return args.tokens_artifact
+    ds   = _slugify(args.dataset_name)
+    tok  = _slugify(args.tokenizer_name)
+    n    = "full" if not args.max_stories else f"n{args.max_stories}"
+    case = "lc" if args.lowercase else "tc"          # lowercased / true-case
+    sl   = f"s{args.seq_len}"
+    # v3 = packed (N, seq_len+1) format with lowercase support; older v1/v2
+    # caches used a 1D overlapping-window stream and are NOT interchangeable.
+    return f"tokens-{ds}-tok-{tok}-{case}-{sl}-{n}-v3"
+
+
+def _tokens_artifact_ref(args) -> str:
+    """Build the full `entity/project/name:alias` reference."""
+    project = args.tokens_artifact_project or args.wandb_project
+    entity  = args.tokens_artifact_entity  or args.wandb_entity
+    name    = _tokens_artifact_name(args)
+    if entity:
+        return f"{entity}/{project}/{name}:latest"
+    return f"{project}/{name}:latest"
+
+
+def _try_download_tokens(args, cache_path: str) -> bool:
+    """Master-only. Try fetching the tokens artifact and write to cache_path.
+
+    Returns True on success, False otherwise (silently — caller falls back
+    to local tokenization).
+    """
+    if not HAS_WANDB or args.no_tokens_artifact or args.no_wandb:
+        return False
+    ref = _tokens_artifact_ref(args)
+    print(f"Looking for cached tokens artifact: {ref}", flush=True)
+    try:
+        api = wandb.Api()
+        artifact = api.artifact(ref, type="dataset")
+        download_dir = artifact.download()
+        # Find the .pt file inside the artifact directory.
+        files = [os.path.join(download_dir, f)
+                 for f in os.listdir(download_dir) if f.endswith(".pt")]
+        if not files:
+            print(f"  ↳ artifact has no .pt file; falling back to local tokenize",
+                  flush=True)
+            return False
+        # Atomic move into the expected cache path.
+        os.makedirs(os.path.dirname(os.path.abspath(cache_path)) or ".", exist_ok=True)
+        os.replace(files[0], cache_path)
+        size_mb = os.path.getsize(cache_path) / 1024**2
+        print(f"  ↳ downloaded {size_mb:.1f} MB → {cache_path}", flush=True)
+        return True
+    except Exception as e:
+        print(f"  ↳ download skipped ({type(e).__name__}: {e})", flush=True)
+        return False
+
+
+def _try_upload_tokens(args, cache_path: str):
+    """Master-only. Upload tokens cache to wandb as a versioned artifact.
+
+    Idempotent: wandb dedupes by content hash, so a re-upload of the same
+    file does not create a new version. Requires an active wandb run.
+    """
+    if not HAS_WANDB or args.no_tokens_artifact or args.no_wandb:
+        return
+    if wandb.run is None:
+        print("  ↳ skip tokens upload (no active wandb run)", flush=True)
+        return
+    if not os.path.exists(cache_path):
+        print(f"  ↳ skip tokens upload ({cache_path} missing)", flush=True)
+        return
+    name = _tokens_artifact_name(args)
+    try:
+        size_mb = os.path.getsize(cache_path) / 1024**2
+        print(f"Uploading tokens artifact: {name}  ({size_mb:.1f} MB)...", flush=True)
+        artifact = wandb.Artifact(
+            name=name,
+            type="dataset",
+            description=f"Tokenized {args.dataset_name} via {args.tokenizer_name}",
+            metadata={
+                "dataset_name":   args.dataset_name,
+                "dataset_split":  args.dataset_split,
+                "tokenizer_name": args.tokenizer_name,
+                "text_column":    args.text_column,
+                "max_stories":    args.max_stories,
+                "size_mb":        round(size_mb, 1),
+            },
+        )
+        artifact.add_file(cache_path)
+        wandb.log_artifact(artifact, aliases=["latest"])
+        print(f"  ↳ uploaded (alias: latest)", flush=True)
+    except Exception as e:
+        print(f"  ↳ upload failed ({type(e).__name__}: {e}); training continues",
+              flush=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tier 1/2 metric helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -303,9 +410,19 @@ def _mamba_flops_per_token_forward(cfg: MambaLMConfig) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tokenize_and_cache(args, cache_path: str):
-    """Tokenize the HF SimpleStories corpus into a single int32 stream.
+    """Tokenize the HF SimpleStories corpus into packed (N, seq_len+1) chunks.
 
-    The full dataset is concatenated story-by-story, separated by EOS.
+    Matches the SimpleStories reference pipeline
+    (`simple_stories_train.dataloaders.tokenize_and_concatenate`):
+      * Optionally lowercases text (their `to_lower=True` flag)
+      * Parallel batched tokenization via `datasets.map(num_proc=...)`
+      * Concatenates story-by-story separated by EOS
+      * Packs into non-overlapping (N, seq_len+1) chunks — `chunk[:-1]` is the
+        input and `chunk[1:]` is the next-token target. Each token contributes
+        to exactly one training example, so the standard
+        `tokens_seen = num_steps × B × seq_len × world_size` accounting is
+        accurate (no overlap inflation).
+
     Only the *master* rank should call this; other ranks load from cache.
     """
     if not HAS_DATASETS:
@@ -319,6 +436,19 @@ def _tokenize_and_cache(args, cache_path: str):
 
     print(f"Loading dataset {args.dataset_name!r}...", flush=True)
     ds = load_dataset(args.dataset_name, split=args.dataset_split)
+    # Project to just the text column. SimpleStories ships several metadata
+    # columns (topic, style, etc.) that we never read; dropping them frees
+    # the unused arrays from the mmap'd Arrow table.
+    all_cols = list(ds.column_names)
+    if args.text_column not in all_cols:
+        raise KeyError(
+            f"text_column={args.text_column!r} not in dataset columns {all_cols!r}"
+        )
+    dropped_cols = [c for c in all_cols if c != args.text_column]
+    if dropped_cols:
+        ds = ds.select_columns([args.text_column])
+        print(f"  ↳ kept {args.text_column!r}; dropped {len(dropped_cols)} unused: "
+              f"{dropped_cols}", flush=True)
     if args.max_stories:
         ds = ds.select(range(min(args.max_stories, len(ds))))
     print(f"  ↳ {len(ds):,} stories", flush=True)
@@ -332,36 +462,82 @@ def _tokenize_and_cache(args, cache_path: str):
         print(f"  ↳ tokenizer has no EOS; using id={eos} as separator")
     vocab_size = len(tok)                  # includes any added special tokens
 
-    print(f"Tokenizing {len(ds):,} stories...", flush=True)
-    stream = []
+    text_col  = args.text_column
+    lowercase = bool(args.lowercase)
+
+    # Batched parallel tokenization. The batched-with-num_proc path uses the
+    # fast Rust tokenizers backend internally and pegs ~10× higher throughput
+    # than the per-story Python loop. Returns one ids list per story (with EOS
+    # appended) plus its UTF-8 byte count for the bits-per-byte axis.
+    def _tok_fn(examples):
+        texts = examples[text_col]
+        if lowercase:
+            texts = [t.lower() for t in texts]
+        nbytes = [len(t.encode("utf-8")) for t in texts]
+        encoded = tok(texts, add_special_tokens=False)["input_ids"]
+        return {
+            "ids":    [seq + [eos] for seq in encoded],
+            "nbytes": nbytes,
+        }
+
+    n_proc = max(1, int(getattr(args, "tokenize_num_proc", 10)))
+    print(f"Tokenizing {len(ds):,} stories  "
+          f"(lowercase={lowercase}, num_proc={n_proc})...", flush=True)
+    ds_tok = ds.map(
+        _tok_fn,
+        batched=True,
+        batch_size=1000,
+        num_proc=n_proc,
+        remove_columns=ds.column_names,
+        desc="tokenize",
+    )
+
+    # Concatenate into a single 1D stream + accumulate UTF-8 byte total.
+    print("Concatenating story streams...", flush=True)
+    stream: list[int] = []
     total_bytes = 0
-    for ex in tqdm(ds, desc="tokenize", unit="story"):
-        text = ex[args.text_column]
-        total_bytes += len(text.encode("utf-8"))
-        ids = tok.encode(text, add_special_tokens=False)
-        stream.extend(ids)
-        stream.append(eos)
+    for ex in tqdm(ds_tok, desc="concatenate", unit="story"):
+        stream.extend(ex["ids"])
+        total_bytes += ex["nbytes"]
     n_tokens = len(stream)
     bytes_per_token = total_bytes / max(n_tokens, 1)
     print(f"  ↳ {n_tokens:,} tokens  (vocab={vocab_size}, "
           f"{bytes_per_token:.3f} bytes/token)", flush=True)
 
-    data = torch.tensor(stream, dtype=torch.int32)
+    # Pack into non-overlapping (N_chunks, seq_len+1) shape. The +1 is the
+    # shift target — input = chunk[:-1], target = chunk[1:].
+    chunk_size = args.seq_len + 1
+    n_chunks = n_tokens // chunk_size
+    if n_chunks < 2:
+        raise RuntimeError(
+            f"Only {n_chunks} chunks of size {chunk_size} from {n_tokens} tokens — "
+            f"corpus too small or seq_len too large."
+        )
+    packed = torch.tensor(stream[: n_chunks * chunk_size], dtype=torch.int32)
+    packed = packed.view(n_chunks, chunk_size)
+    dropped_tail = n_tokens - n_chunks * chunk_size
+    print(f"  ↳ packed: ({n_chunks:,}, {chunk_size}) = "
+          f"{n_chunks * chunk_size:,} tokens  (dropped {dropped_tail} tail)",
+          flush=True)
 
-    # Train/val split — tiny val (1%) since the corpus is large.
-    split = int((1.0 - args.val_fraction) * len(data))
-    train, val = data[:split], data[split:]
+    # Train/val split at chunk granularity so the held-out chunks never
+    # overlap with training context windows.
+    n_val   = max(1, int(args.val_fraction * n_chunks))
+    n_train = n_chunks - n_val
+    train, val = packed[:n_train], packed[n_train:]
 
     cache_obj = {
-        "train":           train,
-        "val":             val,
+        "train":           train,                  # (n_train, seq_len+1) int32
+        "val":             val,                    # (n_val,   seq_len+1) int32
         "vocab_size":      vocab_size,
         "eos_id":          eos,
         "bytes_per_token": bytes_per_token,
         "total_bytes":     total_bytes,
         "tokenizer":       args.tokenizer_name,
         "dataset":         args.dataset_name,
-        "schema_version":  2,
+        "lowercase":       lowercase,
+        "seq_len":         args.seq_len,
+        "schema_version":  3,                      # 3 = packed 2D + lowercase
     }
     tmp_path = cache_path + ".tmp"
     torch.save(cache_obj, tmp_path)
@@ -372,38 +548,81 @@ def _tokenize_and_cache(args, cache_path: str):
 
 
 def prepare_dataset(args, is_master: bool, world_size: int):
-    """Load (or tokenize+cache) the corpus. SPMD-safe with rendezvous."""
+    """Load the tokenized corpus, in priority order:
+        1. local cache file (--tokenized_cache)
+        2. wandb artifact (downloaded into the cache file path)
+        3. tokenize from scratch and write to the cache file
+
+    SPMD-safe: all ranks rendezvous before reading the cache.
+
+    Returns: (train, val, vocab_size, eos_id, bytes_per_token, freshly_tokenized)
+    `freshly_tokenized` tells the caller whether the cache was just produced
+    locally (and therefore needs uploading to wandb after `wandb.init`).
+    """
     cache_path = args.tokenized_cache
+    freshly_tokenized = False
 
-    needs_tokenize = not os.path.exists(cache_path)
-    if needs_tokenize and is_master:
-        _tokenize_and_cache(args, cache_path)
+    if not os.path.exists(cache_path) and is_master:
+        # Try wandb artifact download before falling back to local tokenization.
+        if not _try_download_tokens(args, cache_path):
+            _tokenize_and_cache(args, cache_path)
+            freshly_tokenized = True
 
-    # All ranks meet here; non-master waited while master tokenized.
+    # All ranks meet here; non-master waited while master prepped the cache.
     if HAS_XLA and world_size > 1:
         xm.rendezvous("dataset_ready")
 
     obj = torch.load(cache_path, map_location="cpu", weights_only=False)
-    # Backward-compat: schema v1 caches lacked bytes_per_token.
+    schema = obj.get("schema_version", 1)
+    if schema != 3:
+        raise RuntimeError(
+            f"Cache {cache_path} has schema_version={schema}; this script expects "
+            f"v3 (packed 2D format with lowercase support). Delete the cache file "
+            f"and re-run to regenerate."
+        )
+    cached_seq_len = obj.get("seq_len", None)
+    if cached_seq_len is not None and cached_seq_len != args.seq_len:
+        raise RuntimeError(
+            f"Cache {cache_path} was tokenized with seq_len={cached_seq_len} but "
+            f"this run requested --seq_len {args.seq_len}. Delete the cache or "
+            f"pass --seq_len {cached_seq_len}."
+        )
+    cached_lowercase = obj.get("lowercase", None)
+    if cached_lowercase is not None and cached_lowercase != bool(args.lowercase):
+        raise RuntimeError(
+            f"Cache {cache_path} was tokenized with lowercase={cached_lowercase} "
+            f"but this run requested --lowercase={args.lowercase}. Delete the "
+            f"cache or flip the flag to match."
+        )
     bytes_per_token = obj.get("bytes_per_token", None)
-    return obj["train"], obj["val"], obj["vocab_size"], obj["eos_id"], bytes_per_token
+    return (obj["train"], obj["val"], obj["vocab_size"], obj["eos_id"],
+            bytes_per_token, freshly_tokenized)
 
 
-class TokenStreamDataset(Dataset):
-    """Fixed-length chunks from a long contiguous int32 token stream."""
+class PackedTokenDataset(Dataset):
+    """Non-overlapping packed chunks of shape (N, seq_len+1).
 
-    def __init__(self, data: torch.Tensor, seq_len: int):
-        assert data.dtype == torch.int32
+    Each item is the standard next-token-prediction pair derived by shifting
+    the chunk by one: `x = chunk[:-1]`, `y = chunk[1:]`, both of length
+    `seq_len`. One token contributes to exactly one training example, so
+    `tokens_seen = num_steps × B × seq_len × world_size` reflects real data
+    exposure (no overlap inflation as in the previous TokenStreamDataset).
+
+    Matches the convention used by nanoGPT / llm.c / simple_stories_train,
+    so token-budget comparisons against the SimpleStories baseline are 1:1.
+    """
+
+    def __init__(self, data: torch.Tensor):
+        assert data.dtype == torch.int32 and data.ndim == 2, \
+            f"expected (N, seq_len+1) int32; got {tuple(data.shape)} {data.dtype}"
         self.data = data
-        self.seq_len = seq_len
 
     def __len__(self) -> int:
-        return max(0, len(self.data) - self.seq_len)
+        return self.data.shape[0]
 
     def __getitem__(self, idx):
-        x = self.data[idx     : idx + self.seq_len]
-        y = self.data[idx + 1 : idx + self.seq_len + 1]
-        return x, y
+        chunk = self.data[idx]
+        return chunk[:-1], chunk[1:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -445,7 +664,8 @@ def train(args, rank: int = 0):
     torch.manual_seed(args.seed + rank)
 
     # ── Data ───────────────────────────────────────────────────────────────
-    train_data, val_data, vocab_size, eos_id, bytes_per_token = prepare_dataset(
+    (train_data, val_data, vocab_size, eos_id,
+     bytes_per_token, freshly_tokenized) = prepare_dataset(
         args, is_master=is_master, world_size=world_size,
     )
     if bytes_per_token is None:
@@ -454,11 +674,16 @@ def train(args, rank: int = 0):
         bytes_per_token = 4.0    # SimpleStories rough average — overridden once retokenised
         log(f"WARNING: cache lacks bytes_per_token; assuming {bytes_per_token}. "
             f"Delete the cache to retokenise for accurate bits/byte.")
-    log(f"Tokens: train={len(train_data):,}  val={len(val_data):,}  "
+    # Packed-format size logging: report both chunk count (==len(dataset)) and
+    # the underlying token count, so the per-epoch token budget is obvious.
+    train_tok = train_data.shape[0] * train_data.shape[1]
+    val_tok   = val_data.shape[0]   * val_data.shape[1]
+    log(f"Chunks: train={train_data.shape[0]:,} ({train_tok:,} tok)  "
+        f"val={val_data.shape[0]:,} ({val_tok:,} tok)  "
         f"vocab={vocab_size}  eos={eos_id}  bytes/token={bytes_per_token:.3f}")
 
-    train_ds = TokenStreamDataset(train_data, args.seq_len)
-    val_ds   = TokenStreamDataset(val_data,   args.seq_len)
+    train_ds = PackedTokenDataset(train_data)
+    val_ds   = PackedTokenDataset(val_data)
 
     # On multi-device, shard the dataset deterministically per rank.
     if HAS_XLA and world_size > 1:
@@ -557,6 +782,13 @@ def train(args, rank: int = 0):
             log(f"wandb.init failed ({e!r}); disabling wandb for this run")
             wandb_enabled = False
 
+    # ── Upload tokens artifact if we just tokenized locally (master only) ──
+    # Idempotent: wandb dedupes by content hash, so re-uploading the same
+    # bytes does not create a new version. Runs only after wandb.init so
+    # the artifact is attached to this run's lineage.
+    if freshly_tokenized and is_master and wandb_enabled:
+        _try_upload_tokens(args, args.tokenized_cache)
+
     # ── Optimiser & schedule ───────────────────────────────────────────────
     optimizer = SyncfreeAdamW(
         model.parameters(),
@@ -566,16 +798,50 @@ def train(args, rank: int = 0):
     )
 
     steps_per_epoch = len(train_loader)
-    total_steps = args.epochs * steps_per_epoch
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=max(total_steps, 1),
-        eta_min=args.lr / 10.0,             # never zero — see §9.5
-    )
+    tokens_per_step = args.batch_size * args.seq_len * world_size
+    # Budget resolution priority: --max_tokens > --max_steps > --epochs.
+    # `--max_tokens` is the cleanest knob for matching the SimpleStories
+    # baseline (60k iter × 64 × 512 ≈ 2B tokens, regardless of how many
+    # TPU cores you spread across).
+    if args.max_tokens > 0:
+        total_steps = max(1, args.max_tokens // tokens_per_step)
+        budget_src  = (f"--max_tokens {args.max_tokens:,} "
+                       f"({total_steps * tokens_per_step:,} tok actual)")
+    elif args.max_steps > 0:
+        total_steps = args.max_steps
+        budget_src  = f"--max_steps {args.max_steps}"
+    else:
+        total_steps = args.epochs * steps_per_epoch
+        budget_src  = f"--epochs {args.epochs}  ({steps_per_epoch} step/epoch)"
 
-    log(f"Training: {args.epochs} epoch(s)  "
-        f"{steps_per_epoch} steps/epoch  {total_steps} total steps  "
-        f"({args.batch_size * args.seq_len * world_size:,} tok / global step)")
+    # Warmup + cosine. eta_min=lr/10 matches the SimpleStories
+    # `learning_rate_decay_frac=0.1` (cosine never falls below 10% of peak).
+    if args.warmup_steps > 0:
+        # Linear warmup (start at 1% of peak so step-0 isn't an exact zero
+        # which would zero the param updates and confuse on-device norms).
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-2, end_factor=1.0,
+            total_iters=args.warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(total_steps - args.warmup_steps, 1),
+            eta_min=args.lr / 10.0,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine],
+            milestones=[args.warmup_steps],
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(total_steps, 1),
+            eta_min=args.lr / 10.0,
+        )
+
+    log(f"Training: {budget_src}")
+    log(f"  ↳ total_steps={total_steps}  warmup={args.warmup_steps}  "
+        f"steps_per_epoch={steps_per_epoch}  ({tokens_per_step:,} tok / global step)")
 
     # ── DataLoader wrapping (async TPU prefetch) ───────────────────────────
     if HAS_XLA:
@@ -767,6 +1033,82 @@ def train(args, rank: int = 0):
                             except Exception as e:
                                 # Don't crash training over a logging hiccup.
                                 print(f"  ↳ wandb.log failed: {e!r}", flush=True)
+
+                # ── Intermediate validation (sweep early-termination signal) ──
+                # Runs across all ranks because evaluate() does an all-reduce.
+                # Lightweight: limited to args.val_every_n_batches batches.
+                if (args.val_every_n_steps > 0
+                        and global_step % args.val_every_n_steps == 0):
+                    eval_out = evaluate(
+                        model, val_iter_loader, pad_vocab, device,
+                        max_batches=args.val_every_n_batches,
+                        autocast_ctx=autocast_ctx,
+                    )
+                    iv_loss = eval_out["loss"]
+                    iv_ppl  = (math.exp(min(iv_loss, 20))
+                               if math.isfinite(iv_loss) else float("nan"))
+                    iv_bpb  = _bits_per_byte(iv_loss, bytes_per_token)
+                    if iv_loss < best_val:
+                        best_val     = iv_loss
+                        best_val_ppl = iv_ppl
+                    if is_master:
+                        log(f"  ↳ step {global_step}  val_loss {iv_loss:.4f}  "
+                            f"val_ppl {iv_ppl:.2f}  bpb {iv_bpb:.4f}  "
+                            f"(best {best_val:.4f})")
+                        if wandb_enabled:
+                            try:
+                                wandb.log({
+                                    "val/loss":               iv_loss,
+                                    "val/perplexity":         iv_ppl,
+                                    "val/loss_bits_per_byte": iv_bpb,
+                                    "val/best_loss":          best_val,
+                                    "val/best_perplexity":    best_val_ppl,
+                                }, step=global_step)
+                            except Exception as e:
+                                print(f"  ↳ wandb.log (iv) failed: {e!r}",
+                                      flush=True)
+
+                # ── Budget early-stop ──
+                # Honour --max_tokens / --max_steps without finishing the epoch.
+                # Force one final val pass so the run never exits without a
+                # val/loss readout (matters for sweep ranking).
+                if global_step >= total_steps:
+                    if (args.val_every_n_steps == 0
+                            or global_step % args.val_every_n_steps != 0):
+                        eval_out = evaluate(
+                            model, val_iter_loader, pad_vocab, device,
+                            max_batches=args.eval_batches,
+                            autocast_ctx=autocast_ctx,
+                        )
+                        fv_loss = eval_out["loss"]
+                        fv_ppl  = (math.exp(min(fv_loss, 20))
+                                   if math.isfinite(fv_loss) else float("nan"))
+                        fv_bpb  = _bits_per_byte(fv_loss, bytes_per_token)
+                        if fv_loss < best_val:
+                            best_val     = fv_loss
+                            best_val_ppl = fv_ppl
+                        if is_master:
+                            log(f"  ↳ final val (budget hit)  loss {fv_loss:.4f}  "
+                                f"ppl {fv_ppl:.2f}  bpb {fv_bpb:.4f}")
+                            if wandb_enabled:
+                                try:
+                                    wandb.log({
+                                        "val/loss":               fv_loss,
+                                        "val/perplexity":         fv_ppl,
+                                        "val/loss_bits_per_byte": fv_bpb,
+                                        "val/best_loss":          best_val,
+                                        "val/best_perplexity":    best_val_ppl,
+                                    }, step=global_step)
+                                except Exception as e:
+                                    print(f"  ↳ wandb.log (final-iv) failed: {e!r}",
+                                          flush=True)
+                    break
+
+            # Outer epoch loop — propagate the early-stop break.
+            if global_step >= total_steps:
+                log(f"Reached step budget ({global_step}/{total_steps}); "
+                    f"stopping epoch loop.")
+                break
 
             # ── End-of-epoch validation ────────────────────────────────────
             eval_out = evaluate(model, val_iter_loader, pad_vocab,
@@ -1008,10 +1350,22 @@ def main():
                         help="Name of the text column in the HF dataset")
     parser.add_argument("--tokenizer_name",  default="SimpleStories/SimpleStories-5M",
                         help="HF tokenizer (same vocab as the baseline transformer)")
-    parser.add_argument("--tokenized_cache", default="simplestories_tokens.pt")
+    parser.add_argument("--tokenized_cache", default="simplestories_tokens_v3.pt",
+                        help="Local cache of tokenized corpus. v3 = packed (N, "
+                             "seq_len+1) format with lowercase support; v1/v2 "
+                             "files are NOT compatible — delete them or pass a "
+                             "fresh path.")
     parser.add_argument("--max_stories",     type=int, default=0,
                         help="Limit corpus size for smoke tests (0 = full)")
     parser.add_argument("--val_fraction",    type=float, default=0.01)
+    parser.add_argument("--lowercase", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Lowercase text before tokenization "
+                             "(matches SimpleStories `to_lower=True`). "
+                             "Pass --no-lowercase to disable.")
+    parser.add_argument("--tokenize_num_proc", type=int, default=10,
+                        help="Parallel processes for datasets.map() "
+                             "tokenization. 1 disables parallelism.")
 
     # ── Model (param-matched to SimpleStories-5M, canonical Mamba E=2) ─────
     parser.add_argument("--n_layer",     type=int, default=9)     # Mamba prefers depth
@@ -1034,6 +1388,28 @@ def main():
     parser.add_argument("--num_workers",  type=int,   default=2)
     parser.add_argument("--prefetch",     type=int,   default=4,
                         help="MpDeviceLoader prefetch depth")
+
+    # ── Token / step budget (overrides --epochs when > 0) ──────────────────
+    # `--max_tokens` is the cleanest way to match the SimpleStories baseline:
+    # 60 000 iter × 64 batch × 512 ctx ≈ 2 000 000 000 tokens, regardless of
+    # how many TPU cores you spread across (the script computes the right
+    # step count given world_size).
+    parser.add_argument("--max_tokens", type=int, default=0,
+                        help="Stop after this many tokens (0 = use --epochs / "
+                             "--max_steps). SimpleStories 5M baseline ≈ 2e9.")
+    parser.add_argument("--max_steps",  type=int, default=0,
+                        help="Stop after this many optimizer steps "
+                             "(ignored if --max_tokens > 0). 0 disables.")
+    parser.add_argument("--warmup_steps", type=int, default=0,
+                        help="Linear LR warmup steps before cosine decay. "
+                             "SimpleStories 35M default = 600. 0 disables.")
+    parser.add_argument("--val_every_n_steps", type=int, default=0,
+                        help="Run intermediate validation every N steps. "
+                             "0 = end-of-epoch only. Required for sweep "
+                             "early-termination on val/loss.")
+    parser.add_argument("--val_every_n_batches", type=int, default=20,
+                        help="Batches per intermediate val pass "
+                             "(end-of-epoch val uses --eval_batches).")
 
     # ── Memory & precision ─────────────────────────────────────────────────
     parser.add_argument("--checkpoint", action="store_true",
@@ -1077,6 +1453,24 @@ def main():
     parser.add_argument("--wandb_tags",    nargs="+", default=[])
     parser.add_argument("--no_wandb", action="store_true",
                         help="Disable wandb logging entirely")
+
+    # ── Tokenized-dataset caching via wandb artifacts ──────────────────────
+    # Re-tokenizing the full SimpleStories corpus takes minutes; uploading
+    # the tokenized cache to wandb once and pulling it on subsequent runs
+    # turns startup into a single ~1 GB download.
+    parser.add_argument("--tokens_artifact", default=None,
+                        help="wandb Artifact name for cached tokens. Default: "
+                             "auto-derived from --dataset_name + --tokenizer_name "
+                             "+ --max_stories.")
+    parser.add_argument("--tokens_artifact_project", default=None,
+                        help="wandb project that hosts the tokens artifact. "
+                             "Defaults to --wandb_project.")
+    parser.add_argument("--tokens_artifact_entity", default=None,
+                        help="wandb entity for the tokens artifact. "
+                             "Defaults to --wandb_entity (or your default entity).")
+    parser.add_argument("--no_tokens_artifact", action="store_true",
+                        help="Skip both downloading and uploading the tokenized "
+                             "cache as a wandb artifact (use local file only).")
 
     args = parser.parse_args()
 

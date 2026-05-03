@@ -2,3 +2,16 @@
 .claude/
 __pycache__
 .env
+mamba/xla_tpu_reference.md
+wb.py
+.gitignore
+wandb_history_smoke.json
+stories_lm.ipynb
+shakespeare.txt
+shakespeare_lm_run.ipynb
+mamba_block_tests.ipynb
+kernel_benchmark.ipynb
+_analyze_wandb.py
+.gitignore
+_gen_shakespeare_nb.py
+_gen_bench_nb.py

@@ -896,14 +896,37 @@ def train(args, rank: int = 0):
         if args.bf16 else _nullcontext()
     )
 
+    # ── Resume (optional) ──────────────────────────────────────────────────
+    # Must happen AFTER optimizer + scheduler exist (load_state_dict targets
+    # them) and BEFORE the training loop reads global_step / best_val.
+    resumed = _resume_from_checkpoint(
+        args, model, optimizer, scheduler,
+        device=device, is_master=is_master, world_size=world_size, log=log,
+    )
+    if resumed is not None:
+        global_step  = resumed["global_step"]
+        best_val     = resumed["best_val"]
+        best_val_ppl = resumed["best_val_ppl"]
+        # Derive start_epoch from global_step (intermediate checkpoints
+        # don't carry an `epoch` field, but the integer division is always
+        # correct provided steps_per_epoch matches the saved run — already
+        # enforced by the seq_len/batch_size match check).
+        start_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
+        if start_epoch >= args.epochs:
+            log(f"WARNING: resumed at step {global_step} (epoch {start_epoch + 1}) "
+                f"but --epochs {args.epochs} leaves no remaining epochs. "
+                f"Bump --epochs to continue training.")
+    else:
+        global_step  = 0
+        best_val     = float("inf")
+        best_val_ppl = float("inf")
+        start_epoch  = 0
+
     # ── Training loop ──────────────────────────────────────────────────────
     model.train()
-    global_step = 0
     log_buf = []
     t_start = time.time()
     t_last_log = t_start
-    best_val = float("inf")
-    best_val_ppl = float("inf")
     crashed = False
     # Track most recent train avg loss for the val/overfit_gap metric.
     last_train_loss_avg = float("nan")
@@ -911,11 +934,23 @@ def train(args, rank: int = 0):
     sample_tok = None
 
     try:
-        for epoch in range(args.epochs):
+        for epoch in range(start_epoch, args.epochs):
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
 
-            for x, y in train_iter_loader:
+            # Mid-epoch resume: skip already-completed batches in the first
+            # resumed epoch. islice consumes the iterator without invoking
+            # the model — tokens are loaded but not trained on. Cheap.
+            iter_loader = train_iter_loader
+            if epoch == start_epoch and resumed is not None and steps_per_epoch > 0:
+                skip_batches = global_step - epoch * steps_per_epoch
+                if skip_batches > 0:
+                    log(f"Resuming mid-epoch: skipping {skip_batches} "
+                        f"already-completed batches in epoch {epoch + 1}.")
+                    import itertools as _it
+                    iter_loader = _it.islice(train_iter_loader, skip_batches, None)
+
+            for x, y in iter_loader:
                 if not HAS_XLA:
                     x = x.to(device, non_blocking=True)
                     y = y.to(device, non_blocking=True)
@@ -1109,6 +1144,8 @@ def train(args, rank: int = 0):
                             step=global_step, val_loss=iv_loss,
                             new_best=iv_new_best,
                             wandb_enabled=wandb_enabled,
+                            optimizer=optimizer, scheduler=scheduler,
+                            best_val=best_val, best_val_ppl=best_val_ppl,
                             extra_aliases=["intermediate"],
                             extra_metadata={"loss_bits_per_byte": iv_bpb},
                         )
@@ -1154,6 +1191,8 @@ def train(args, rank: int = 0):
                                 step=global_step, val_loss=fv_loss,
                                 new_best=fv_new_best,
                                 wandb_enabled=wandb_enabled,
+                                optimizer=optimizer, scheduler=scheduler,
+                                best_val=best_val, best_val_ppl=best_val_ppl,
                                 extra_aliases=["budget-hit"],
                                 extra_metadata={"loss_bits_per_byte": fv_bpb},
                             )
@@ -1195,6 +1234,8 @@ def train(args, rank: int = 0):
                     new_best=new_best,
                     wandb_enabled=wandb_enabled,
                     epoch=epoch + 1,
+                    optimizer=optimizer, scheduler=scheduler,
+                    best_val=best_val, best_val_ppl=best_val_ppl,
                     extra_aliases=["epoch-end"],
                     extra_metadata={
                         "loss_bits_per_byte": val_bpb,
@@ -1277,6 +1318,9 @@ def train(args, rank: int = 0):
                 extra={"val_loss": best_val, "epoch": args.epochs},
                 wandb_enabled=wandb_enabled,
                 artifact_aliases=["final"],
+                optimizer=optimizer, scheduler=scheduler,
+                global_step=global_step, epoch=args.epochs,
+                best_val=best_val, best_val_ppl=best_val_ppl,
             )
 
         # ── XLA debug summary (master only) ────────────────────────────────
@@ -1294,8 +1338,27 @@ def train(args, rank: int = 0):
                 pass
 
 
+def _state_to_cpu(obj):
+    """Recursively migrate every torch.Tensor in a state-dict-shaped tree to CPU.
+
+    Optimizer state dicts contain tensors (Adam's `m`, `v`, step counters) that
+    live on the XLA device after step() has run; serialising them straight to
+    disk would carry XLA tensor metadata that fails to load on a fresh process.
+    """
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _state_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        coll = [_state_to_cpu(v) for v in obj]
+        return type(obj)(coll)
+    return obj
+
+
 def _checkpoint_after_eval(*, model, cfg, args, save_path, step, val_loss,
                            new_best, wandb_enabled, epoch=None,
+                           optimizer=None, scheduler=None,
+                           best_val=None, best_val_ppl=None,
                            extra_aliases=None, extra_metadata=None):
     """Save + upload a checkpoint artifact tied to a just-completed evaluation.
 
@@ -1307,6 +1370,9 @@ def _checkpoint_after_eval(*, model, cfg, args, save_path, step, val_loss,
         * "epoch-{N}"    — when an `epoch` is provided
         * "best"         — when this eval set a new best val_loss
     Caller must hold the master-only guard (no SPMD-replicated I/O).
+
+    The optimizer + scheduler + best counters are persisted so the run is
+    fully resumable from this artifact via `--resume_from / --resume_artifact`.
     """
     if not (args.save_path and save_path):
         return
@@ -1332,16 +1398,27 @@ def _checkpoint_after_eval(*, model, cfg, args, save_path, step, val_loss,
         extra=extra,
         wandb_enabled=wandb_enabled,
         artifact_aliases=aliases,
+        optimizer=optimizer, scheduler=scheduler,
+        global_step=step, epoch=epoch,
+        best_val=best_val, best_val_ppl=best_val_ppl,
     )
 
 
 def _save_checkpoint(model, cfg, args, path, extra=None,
                      wandb_enabled: bool = False,
-                     artifact_aliases=None):
+                     artifact_aliases=None,
+                     *,
+                     optimizer=None, scheduler=None,
+                     global_step=None, epoch=None,
+                     best_val=None, best_val_ppl=None):
     """Save checkpoint locally; optionally upload as a wandb artifact.
 
     Caller is responsible for the master-only guard. The wandb upload is
     wrapped in try/except so a failed upload never crashes training.
+
+    When optimizer / scheduler / counters are passed, the payload is fully
+    self-sufficient for resume — `_resume_from_checkpoint` rebuilds the run
+    state from these fields and skips the already-completed batches.
     """
     cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
     payload = {
@@ -1349,6 +1426,20 @@ def _save_checkpoint(model, cfg, args, path, extra=None,
         "state_dict": cpu_state,
         "args":       vars(args),
     }
+    # Resume metadata. None values are intentionally elided so a checkpoint
+    # without these fields stays loadable as model-only.
+    if optimizer is not None:
+        payload["optim_state"] = _state_to_cpu(optimizer.state_dict())
+    if scheduler is not None:
+        payload["sched_state"] = scheduler.state_dict()
+    if global_step is not None:
+        payload["global_step"] = int(global_step)
+    if epoch is not None:
+        payload["epoch"] = int(epoch)
+    if best_val is not None:
+        payload["best_val"] = float(best_val)
+    if best_val_ppl is not None:
+        payload["best_val_ppl"] = float(best_val_ppl)
     if extra:
         payload.update(extra)
     tmp = path + ".tmp"
@@ -1377,6 +1468,136 @@ def _save_checkpoint(model, cfg, args, path, extra=None,
                   flush=True)
         except Exception as e:
             print(f"  ↳ wandb artifact upload failed: {e!r}", flush=True)
+
+
+_RESUME_LOCAL_PATH = "_resume_checkpoint.pt"
+
+
+def _resume_from_checkpoint(args, model, optimizer, scheduler, *,
+                            device, is_master, world_size, log) -> dict | None:
+    """Restore training state from a local file or wandb artifact.
+
+    Resolution order:
+        1. --resume_artifact ENTITY/PROJECT/NAME:ALIAS  (master downloads,
+           all ranks read from `_resume_checkpoint.pt`)
+        2. --resume_from PATH                           (all ranks read PATH)
+
+    Loads:
+        * model weights              (always)
+        * optimizer + scheduler      (unless --resume_reset_optimizer)
+        * counters                   (global_step, epoch, best_val, best_val_ppl)
+
+    Validates architecture and seq_len match before touching state. Mismatch
+    fails loudly rather than silently corrupting training. Returns the run
+    state dict or None if no resume was requested.
+
+    SPMD-safe: only master downloads the artifact; all ranks rendezvous
+    before reading the local cache file.
+    """
+    cache_path = None
+
+    if args.resume_artifact:
+        if not HAS_WANDB:
+            raise RuntimeError("--resume_artifact requires the wandb package")
+        if is_master:
+            log(f"Downloading checkpoint artifact: {args.resume_artifact}")
+            try:
+                api = wandb.Api()
+                artifact = api.artifact(args.resume_artifact, type="model")
+                d = artifact.download()
+                files = [os.path.join(d, f)
+                         for f in os.listdir(d) if f.endswith(".pt")]
+                if not files:
+                    raise RuntimeError(
+                        f"Artifact {args.resume_artifact} contains no .pt file"
+                    )
+                os.replace(files[0], _RESUME_LOCAL_PATH)
+                size_mb = os.path.getsize(_RESUME_LOCAL_PATH) / 1024**2
+                log(f"  ↳ downloaded {size_mb:.1f} MB → {_RESUME_LOCAL_PATH}")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to download resume artifact "
+                    f"{args.resume_artifact!r}: {e!r}"
+                )
+        cache_path = _RESUME_LOCAL_PATH
+    elif args.resume_from:
+        cache_path = args.resume_from
+    else:
+        return None
+
+    # All ranks meet here; non-master waited while master pulled the artifact.
+    if HAS_XLA and world_size > 1:
+        xm.rendezvous("resume_ready")
+
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(
+            f"Resume checkpoint {cache_path!r} does not exist on rank "
+            f"{0 if is_master else '?'}."
+        )
+
+    log(f"Loading checkpoint from {cache_path}")
+    payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+
+    # ── Architecture compatibility check ───────────────────────────────────
+    saved_cfg = payload.get("config", {})
+    cur_cfg   = model.config.__dict__
+    arch_keys = ("n_layer", "d_input", "d_model", "d_state", "dt_rank",
+                 "kernel_size", "vocab_size", "tie_embeddings")
+    mismatches = [(k, saved_cfg.get(k), cur_cfg.get(k)) for k in arch_keys
+                  if saved_cfg.get(k) != cur_cfg.get(k)]
+    if mismatches:
+        details = "; ".join(f"{k}: saved={s!r} current={c!r}"
+                            for k, s, c in mismatches)
+        raise RuntimeError(
+            f"Architecture mismatch on resume — refuse to load. {details}"
+        )
+
+    # Sequence length must match because steps_per_epoch and the scheduler
+    # curve depend on it. Same for batch_size at the global level.
+    saved_args = payload.get("args", {})
+    seq_len_saved   = saved_args.get("seq_len", args.seq_len)
+    if seq_len_saved != args.seq_len:
+        raise RuntimeError(
+            f"seq_len mismatch on resume: saved={seq_len_saved} current={args.seq_len}"
+        )
+
+    # ── Restore model weights ──────────────────────────────────────────────
+    missing, unexpected = model.load_state_dict(payload["state_dict"],
+                                                strict=True)
+    if missing or unexpected:
+        log(f"  ↳ load_state_dict report — missing={missing} unexpected={unexpected}")
+    model.to(device)
+
+    # ── Restore optimizer + scheduler (or rebuild fresh) ───────────────────
+    loaded_optim = False
+    loaded_sched = False
+    if not args.resume_reset_optimizer:
+        if "optim_state" in payload:
+            try:
+                optimizer.load_state_dict(payload["optim_state"])
+                loaded_optim = True
+            except Exception as e:
+                log(f"  ↳ optimizer load failed ({e!r}); continuing with fresh optimizer")
+        if "sched_state" in payload:
+            try:
+                scheduler.load_state_dict(payload["sched_state"])
+                loaded_sched = True
+            except Exception as e:
+                log(f"  ↳ scheduler load failed ({e!r}); continuing with fresh scheduler")
+
+    state = {
+        "global_step":  int(payload.get("global_step", 0)),
+        "best_val":     float(payload.get("best_val",     float("inf"))),
+        "best_val_ppl": float(payload.get("best_val_ppl", float("inf"))),
+        "epoch":        int(payload.get("epoch", 0)),
+        "loaded_optim": loaded_optim,
+        "loaded_sched": loaded_sched,
+    }
+    log(f"  ↳ resumed: global_step={state['global_step']}  "
+        f"epoch={state['epoch']}  best_val={state['best_val']:.4f}  "
+        f"optim={'loaded' if loaded_optim else 'fresh'}  "
+        f"sched={'loaded' if loaded_sched else 'fresh'}")
+    return state
 
 
 @torch.no_grad()
@@ -1545,6 +1766,22 @@ def main():
     parser.add_argument("--save_path", default="mamba_simplestories_5m.pt")
     parser.add_argument("--multi_device", action="store_true",
                         help="Launch one process per TPU core (xmp.spawn)")
+
+    # ── Resume training from a previous run ─────────────────────────────────
+    # Two sources, in priority order: --resume_artifact (master pulls from
+    # wandb, all ranks read locally) > --resume_from (all ranks read PATH).
+    # Architecture / seq_len / vocab must match the checkpoint exactly.
+    parser.add_argument("--resume_from", default=None,
+                        help="Path to a local .pt checkpoint to resume from. "
+                             "All ranks must see the same path.")
+    parser.add_argument("--resume_artifact", default=None,
+                        help="wandb artifact reference to resume from "
+                             "(format: 'entity/project/name:alias'). Master "
+                             "downloads, all ranks then read the local cache.")
+    parser.add_argument("--resume_reset_optimizer", action="store_true",
+                        help="Load model weights only — rebuild optimizer + "
+                             "scheduler from scratch. Use to warm-start with "
+                             "different lr / wd / schedule.")
 
     # ── wandb (master-only side-effects; gracefully optional) ──────────────
     parser.add_argument("--wandb_project", default="mamba-simplestories")

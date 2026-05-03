@@ -1048,7 +1048,8 @@ def train(args, rank: int = 0):
                     iv_ppl  = (math.exp(min(iv_loss, 20))
                                if math.isfinite(iv_loss) else float("nan"))
                     iv_bpb  = _bits_per_byte(iv_loss, bytes_per_token)
-                    if iv_loss < best_val:
+                    iv_new_best = iv_loss < best_val
+                    if iv_new_best:
                         best_val     = iv_loss
                         best_val_ppl = iv_ppl
                     if is_master:
@@ -1067,6 +1068,18 @@ def train(args, rank: int = 0):
                             except Exception as e:
                                 print(f"  ↳ wandb.log (iv) failed: {e!r}",
                                       flush=True)
+                        # Snapshot every intermediate eval — wandb dedupes
+                        # identical content but distinct training states each
+                        # produce a new artifact version.
+                        _checkpoint_after_eval(
+                            model=model, cfg=cfg, args=args,
+                            save_path=args.save_path,
+                            step=global_step, val_loss=iv_loss,
+                            new_best=iv_new_best,
+                            wandb_enabled=wandb_enabled,
+                            extra_aliases=["intermediate"],
+                            extra_metadata={"loss_bits_per_byte": iv_bpb},
+                        )
 
                 # ── Budget early-stop ──
                 # Honour --max_tokens / --max_steps without finishing the epoch.
@@ -1084,7 +1097,8 @@ def train(args, rank: int = 0):
                         fv_ppl  = (math.exp(min(fv_loss, 20))
                                    if math.isfinite(fv_loss) else float("nan"))
                         fv_bpb  = _bits_per_byte(fv_loss, bytes_per_token)
-                        if fv_loss < best_val:
+                        fv_new_best = fv_loss < best_val
+                        if fv_new_best:
                             best_val     = fv_loss
                             best_val_ppl = fv_ppl
                         if is_master:
@@ -1102,6 +1116,15 @@ def train(args, rank: int = 0):
                                 except Exception as e:
                                     print(f"  ↳ wandb.log (final-iv) failed: {e!r}",
                                           flush=True)
+                            _checkpoint_after_eval(
+                                model=model, cfg=cfg, args=args,
+                                save_path=args.save_path,
+                                step=global_step, val_loss=fv_loss,
+                                new_best=fv_new_best,
+                                wandb_enabled=wandb_enabled,
+                                extra_aliases=["budget-hit"],
+                                extra_metadata={"loss_bits_per_byte": fv_bpb},
+                            )
                     break
 
             # Outer epoch loop — propagate the early-stop break.
@@ -1126,21 +1149,28 @@ def train(args, rank: int = 0):
                 f"top1 {val_top1*100:.1f}%   top5 {val_top5*100:.1f}%   "
                 f"overfit_gap {overfit_gap:+.4f} ───")
 
-            # Save best-so-far checkpoint (master only).
+            # Snapshot every epoch — capture new_best BEFORE we update so the
+            # checkpoint is correctly tagged.
             new_best = val_loss < best_val
-            if new_best and args.save_path and is_master:
-                best_val = val_loss
+            if new_best:
+                best_val     = val_loss
                 best_val_ppl = val_ppl
-                _save_checkpoint(
-                    model, cfg, args, args.save_path,
-                    extra={"val_loss": val_loss, "epoch": epoch + 1},
+            if is_master:
+                _checkpoint_after_eval(
+                    model=model, cfg=cfg, args=args,
+                    save_path=args.save_path,
+                    step=global_step, val_loss=val_loss,
+                    new_best=new_best,
                     wandb_enabled=wandb_enabled,
-                    artifact_aliases=["best", f"epoch-{epoch + 1}"],
+                    epoch=epoch + 1,
+                    extra_aliases=["epoch-end"],
+                    extra_metadata={
+                        "loss_bits_per_byte": val_bpb,
+                        "top1_accuracy":      val_top1,
+                        "top5_accuracy":      val_top5,
+                        "overfit_gap":        overfit_gap,
+                    },
                 )
-            elif new_best:
-                # Track the best loss even when not saving (e.g. non-master).
-                best_val = val_loss
-                best_val_ppl = val_ppl
 
             if wandb_enabled:
                 tok_done_ep         = global_step * args.batch_size * args.seq_len * world_size
@@ -1230,6 +1260,47 @@ def train(args, rank: int = 0):
                 wandb.finish(exit_code=1 if crashed else 0)
             except Exception:
                 pass
+
+
+def _checkpoint_after_eval(*, model, cfg, args, save_path, step, val_loss,
+                           new_best, wandb_enabled, epoch=None,
+                           extra_aliases=None, extra_metadata=None):
+    """Save + upload a checkpoint artifact tied to a just-completed evaluation.
+
+    Called from every eval site (intermediate val, final-val-on-budget-hit,
+    end-of-epoch val) so that wandb has a model snapshot for each evaluated
+    point in training. Aliases:
+        * "latest"       — auto-applied by wandb to the newest version
+        * "step-{N}"     — every save (lets you fetch a specific step)
+        * "epoch-{N}"    — when an `epoch` is provided
+        * "best"         — when this eval set a new best val_loss
+    Caller must hold the master-only guard (no SPMD-replicated I/O).
+    """
+    if not (args.save_path and save_path):
+        return
+    if not math.isfinite(val_loss):
+        # Avoid serialising a model with NaN params from a corrupted step.
+        print(f"  ↳ skip checkpoint at step {step}: val_loss is non-finite",
+              flush=True)
+        return
+    aliases = [f"step-{step}"]
+    if epoch is not None:
+        aliases.append(f"epoch-{epoch}")
+    if new_best:
+        aliases.append("best")
+    if extra_aliases:
+        aliases.extend(extra_aliases)
+    extra = {"val_loss": float(val_loss), "step": int(step), "best": bool(new_best)}
+    if epoch is not None:
+        extra["epoch"] = int(epoch)
+    if extra_metadata:
+        extra.update(extra_metadata)
+    _save_checkpoint(
+        model, cfg, args, save_path,
+        extra=extra,
+        wandb_enabled=wandb_enabled,
+        artifact_aliases=aliases,
+    )
 
 
 def _save_checkpoint(model, cfg, args, path, extra=None,

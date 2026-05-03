@@ -1,28 +1,38 @@
 # mamba_sweep.yaml — Mamba 5M hyperparameter sweep on TPU
 #
-# Bayesian search over the optimisation hyperparameters that matter most
-# (lr, weight decay, grad clip) plus two SSM-specific levers (d_state,
-# dt_rank) that change parameter count only marginally — n_layer and
-# d_model are deliberately fixed to keep the param budget at ~5M so the
-# comparison against the SimpleStories-5M transformer remains apples-to-
-# apples. Run a separate architecture sweep if you want to vary those.
+# ── Architecture-locked ──────────────────────────────────────────────────
+# Every trial uses the SAME model architecture (n_layer, d_model, d_state,
+# d_input, dt_rank, kernel_size, seq_len, batch_size). Only optimisation
+# knobs vary — lr, weight_decay, grad_clip, warmup_steps. This means every
+# trial compiles the SAME XLA HLO, so the in-process compilation cache is
+# reused across all trials in a single `wandb agent --count N` invocation.
+#
+# Why locked: torch_xla 2.9 has a bug (pytorch/xla#9094, fix open as
+# #9759) where the persistent compilation cache writes to disk but cannot
+# load back on TPU — so every fresh Python process re-compiles from
+# scratch, costing a few minutes per process restart. With architecture
+# fixed and `--count N` set, each agent process pays the compile cost
+# ONCE and then runs N trials at full speed. When #9759 merges into a
+# nightly, the persistent cache will work and architecture-varying sweeps
+# become viable again — at that point you can re-add d_state / dt_rank /
+# n_layer to the parameters block.
 #
 # ── Usage ────────────────────────────────────────────────────────────────
 # 1. Register the sweep (returns a sweep id like `entity/project/abc123`):
 #        wandb sweep mamba_sweep.yaml
 #
-# 2. Launch one or more agents (one per TPU host you have available):
-#        wandb agent <entity>/<project>/<sweep_id>
-#
-#    Each agent picks a config from wandb's Bayesian planner, runs ONE
-#    trial, reports val/loss back, and loops until told to stop or until
-#    the sweep is killed.
+# 2. Launch one or more agents (one per TPU host you have available).
+#    Pass --count to amortise the compile cost across many trials in one
+#    Python process — a typical v4-8 spends 2-4 minutes on first compile
+#    then runs each subsequent trial in pure training time:
+#        wandb agent --count 50 <entity>/<project>/<sweep_id>
 #
 # ── Trial budget ─────────────────────────────────────────────────────────
 # Each trial caps at --max_tokens 2e8 (~200M tokens, ~10% of the full
 # 2B-token SimpleStories budget). On TPU v4-8 with --bf16 and --checkpoint
-# this is roughly 10–15 minutes per trial. Promote the winning config to a
-# full 2B-token run separately (set --max_tokens 2000000000).
+# this is roughly 10–15 minutes of training time per trial. Promote the
+# winning config to a full 2B-token run separately
+# (set --max_tokens 2000000000 and remove --no_tokens_artifact).
 #
 # ── Early termination ────────────────────────────────────────────────────
 # Hyperband kills under-performing runs once their val/loss is clearly
@@ -36,8 +46,11 @@ method: bayes
 name: mamba-5m-bayes-sweep
 description: |
   Bayesian hyperparameter sweep for the param-matched (~5M) Mamba LM
-  on the SimpleStories corpus. Trials use a 200M-token budget. Promote
-  the best config to a full 2B-token training run separately.
+  on the SimpleStories corpus. Architecture is locked to the
+  SimpleStories-5M-equivalent (n_layer=9, d_model=512, d_state=16,
+  dt_rank=16, seq_len=512, batch_size=64) so every trial reuses the
+  in-process XLA compilation cache. Trials use a 200M-token budget;
+  promote the best config to a full 2B-token training run separately.
 
 metric:
   name: val/loss
@@ -53,30 +66,47 @@ early_terminate:
 
 # Wandb appends `--lr=X --weight_decay=Y ...` for each trial via ${args};
 # anything before that block applies to every trial unchanged.
+#
+# Architecture flags hard-coded here (NOT in `parameters`) — changing any
+# of these per trial would invalidate the compiled XLA graph and force a
+# fresh compile, which is the entire problem we're working around.
 command:
   - ${env}
   - python
   - ${program}
+  # ── Hardware / precision (graph-affecting; hold constant) ──
   - --multi_device                            # one process per TPU core
   - --bf16                                    # bf16 autocast forward
   - --checkpoint                              # XLA grad checkpointing per block
+  # ── Architecture (graph-affecting; hold constant) ──
+  - --n_layer=9
+  - --d_input=256
+  - --d_model=512
+  - --d_state=16
+  - --dt_rank=16
+  - --kernel_size=4
+  - --seq_len=512
+  - --batch_size=64
+  # ── Budget / cadence (graph-neutral) ──
   - --max_tokens=200000000                    # 200M tok per trial (~10% of full)
-  - --warmup_steps=200                        # match SimpleStories warmup ratio
   - --log_interval=20
   - --val_every_n_steps=200                   # frequent val for hyperband signal
   - --val_every_n_batches=20                  # cheap intermediate val
   - --eval_batches=50                         # full final val on budget hit
   - --sample_every_n_epochs=0                 # no sampling during sweep trials
   - --no_tokens_artifact                      # avoid race-uploading from N agents
+  # ── wandb routing ──
   - --wandb_project=mamba-simplestories-sweep
   - --wandb_tags
   - sweep
   - 5m
   - bayes
+  - locked-arch
   - ${args}
 
+# Only graph-NEUTRAL hyperparameters here — varying these does not change
+# the compiled XLA graph, so every trial reuses the cached compilation.
 parameters:
-  # ── Optimisation knobs (the main targets of the sweep) ────────────────
   lr:
     distribution: log_uniform_values
     min: 5.0e-5
@@ -87,13 +117,5 @@ parameters:
     max: 0.2
   grad_clip:
     values: [0.5, 1.0, 2.0]
-
-  # ── SSM-specific levers (small param-count effect — kept in budget) ───
-  # d_state and dt_rank scale the projections that touch the SSM internal
-  # state. Their cost is O(D · N) and O(D · R) respectively, both tiny
-  # relative to the input/output projections, so varying them keeps the
-  # model within ±2% of the 5M budget.
-  d_state:
-    values: [8, 16, 32]
-  dt_rank:
-    values: [8, 16, 32]
+  warmup_steps:
+    values: [0, 100, 300, 600]

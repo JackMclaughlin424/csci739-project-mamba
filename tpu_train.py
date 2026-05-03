@@ -286,14 +286,48 @@ def _topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, k: int) -> torch
     return (topk == targets.unsqueeze(-1)).any(-1).float().mean()
 
 
+def _gumbel_top_k_sample(logits: torch.Tensor, *,
+                         temperature: float, top_k: int) -> torch.Tensor:
+    """Categorical sample from logits — XLA-safe.
+
+    Equivalent to `torch.multinomial(F.softmax(logits / T), num_samples=1)`
+    but uses the Gumbel-max trick instead, so it lowers to pure XLA ops
+    (rand_like / log / argmax) — no CPU fallback, no host-device sync.
+
+        argmax(z + Gumbel(0,1)) ≡ Categorical(softmax(z))
+
+    where Gumbel(0,1) = -log(-log(U)), U ~ Uniform(0,1).
+    """
+    logits = logits / max(temperature, 1e-6)
+    if top_k and 0 < top_k < logits.shape[-1]:
+        v, _ = torch.topk(logits, k=top_k, dim=-1)
+        logits = torch.where(
+            logits < v[..., -1:],
+            torch.full_like(logits, float("-inf")),
+            logits,
+        )
+    u = torch.rand_like(logits).clamp_(min=1e-9)         # avoid log(0)
+    gumbel = -torch.log(-torch.log(u))
+    return torch.argmax(logits + gumbel, dim=-1)
+
+
 @torch.no_grad()
 def _generate_sample(model, tokenizer, prompt: str, *,
                      max_new_tokens: int, temperature: float, top_k: int,
                      device, eos_id: int):
-    """Greedy-ish autoregressive sample using model.step() (O(1) per token).
+    """Autoregressive sample via Gumbel-max — TPU/XLA-safe.
 
-    Master-only; uses .item() per generated token at the end (single .cpu()).
-    Acceptable cost since sampling is end-of-epoch only.
+    Two changes vs. the naïve loop that hung on TPU:
+      * Gumbel-max instead of `torch.multinomial` — no CPU fallback.
+      * No per-token `.item()` / EOS check inside the loop — generates a
+        fixed `max_new_tokens`, collects on-device, and does ONE `.cpu()`
+        transfer at the end. EOS truncation happens post-hoc on the host.
+
+    Tradeoff: always pays for `max_new_tokens` worth of decode steps even
+    if EOS arrives early. Fine for end-of-epoch monitoring; not what you
+    want in a serving loop.
+
+    Master-only; the caller already enforces the `is_master` guard.
     """
     model.eval()
     ids = tokenizer.encode(prompt, add_special_tokens=False)
@@ -310,28 +344,26 @@ def _generate_sample(model, tokenizer, prompt: str, *,
     for tok_id in prompt_tensor:
         _, caches = model.step(tok_id.unsqueeze(0), caches)
 
-    # Generate.
+    # Generate exactly `max_new_tokens`. No early stop, no host syncs.
     new_tokens = []
     next_token = prompt_tensor[-1].unsqueeze(0)
     for _ in range(max_new_tokens):
         logits, caches = model.step(next_token, caches)
-        logits = logits / max(temperature, 1e-6)
-        if top_k:
-            v, _ix = torch.topk(logits, k=min(top_k, logits.shape[-1]))
-            logits = torch.where(
-                logits < v[:, [-1]],
-                torch.full_like(logits, float("-inf")),
-                logits,
-            )
-        probs = F.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        next_token = _gumbel_top_k_sample(
+            logits, temperature=temperature, top_k=top_k,
+        )
         new_tokens.append(next_token)
-        if int(next_token.item()) == eos_id:        # one .item() per generated tok
-            break
+
+    # ONE host transfer for all generated tokens. `next_token` is shape (1,)
+    # so stacking gives (max_new_tokens, 1) → squeeze to a flat list.
+    out_ids = torch.stack(new_tokens, dim=0).squeeze(-1).cpu().tolist()
+
+    # Post-hoc EOS truncation on the host side.
+    if eos_id in out_ids:
+        out_ids = out_ids[: out_ids.index(eos_id)]
 
     model.train()
-    all_ids = ids + [int(t.item()) for t in new_tokens]
-    return tokenizer.decode(all_ids, skip_special_tokens=False)
+    return tokenizer.decode(ids + out_ids, skip_special_tokens=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

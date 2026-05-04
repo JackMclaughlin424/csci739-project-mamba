@@ -51,7 +51,7 @@ def load_mamba(path, device):
 
 
 def load_transformer(name, device):
-    model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float32).to(device).eval()
+    model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32).to(device).eval()
     return model
 
 

@@ -365,7 +365,10 @@ def fused_ssm(delta, A, B_proj, x, C_proj, D_param):
         y: (B, L, D) SSM output
     """
     if HAS_TRITON and delta.is_cuda:
-        return _FusedSSM.apply(
+        # Internal compute is fp32 (kernels allocate fp32 buffers); cast
+        # the output back to the caller's dtype so a bf16 model's downstream
+        # output_proj doesn't fail on F.linear(fp32, bf16_weight).
+        y = _FusedSSM.apply(
             delta.contiguous().float(),
             A.contiguous().float(),
             B_proj.contiguous().float(),
@@ -373,4 +376,5 @@ def fused_ssm(delta, A, B_proj, x, C_proj, D_param):
             C_proj.contiguous().float(),
             D_param.contiguous().float(),
         )
+        return y.to(x.dtype)
     return _fused_ssm_ref(delta, A, B_proj, x, C_proj, D_param)

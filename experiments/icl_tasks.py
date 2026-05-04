@@ -4,6 +4,8 @@ Adapted from https://github.com/roeehendel/icl_task_vectors
 # This must be first
 from dotenv import load_dotenv
 
+
+
 load_dotenv(".env")
 
 import sys
@@ -20,6 +22,7 @@ from icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_res
 from icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
 from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
 from icl_task_vectors.core.analysis.utils import logits_top_tokens
+from icl_task_vectors.core.data.tasks.mapping_task import filter_single_token_outputs
 from task_evaluation import calculate_accuracy_on_datasets
 
 
@@ -44,6 +47,37 @@ def seed_everything(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
+MIN_NUM_EXAMPLES = 70
+
+DATA_DIR = "linguistic_mappings"
+
+LINGUISTIC_TASKS = [
+    {"linguistic_present_simple_gerund": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"}
+    }},
+    {"linguistic_present_simple_past_simple": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"}
+    }},
+    {"linguistic_present_simple_past_perfect": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"}
+    }},
+    {"linguistic_singular_plural": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"}
+    }},
+    {"linguistic_plural_singular": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"}
+    }},
+    {"linguistic_antonyms": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"}
+    }}
+]
+
 class LinguisticTask():
     def __init__(
         self,
@@ -57,7 +91,7 @@ class LinguisticTask():
         self.mapping_name = mapping_name
         self.allow_prefix = allow_prefix
 
-        mapping_file = os.path.join(config.DATA_DIR, mapping_type, f"{mapping_name}.json")
+        mapping_file = os.path.join(DATA_DIR, mapping_type, f"{mapping_name}.json")
         with open(mapping_file) as f:
             mapping = json.load(f)
 
@@ -127,32 +161,7 @@ class LinguisticTask():
             test_output,
         )
 
-LINGUISTIC_TASKS = [
-    {"linguistic_present_simple_gerund": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"}
-    }},
-    {"linguistic_present_simple_past_simple": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"}
-    }},
-    {"linguistic_present_simple_past_perfect": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"}
-    }},
-    {"linguistic_singular_plural": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"}
-    }},
-    {"linguistic_plural_singular": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"}
-    }},
-    {"linguistic_antonyms": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"}
-    }}
-]
+
 
 def get_results_file_path(model_type: str, model_variant: str, experiment_id: str = "") -> str:
     return os.path.join(main_experiment_results_dir(experiment_id), f"{model_type}_{model_variant}.pkl")
@@ -185,7 +194,7 @@ def evaluate_task(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, task_n
 
     # Evaluate baseline
     baseline_datasets = task.create_datasets(num_datasets=100, num_examples=0)
-    predictions = run_icl(model, tokenizer, task, baseline_datasets, include_train=False)
+    predictions = run_icl(model, tokenizer, baseline_datasets, include_train=False)
     accuracies["baseline"] = calculate_accuracy_on_datasets(task, predictions, baseline_datasets)
 
     # Evaluate ICL 
@@ -193,7 +202,7 @@ def evaluate_task(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, task_n
     # num_test_datasets, num_dev_datasets = 400, 100
     num_test_datasets, num_dev_datasets = 50, 50
     test_datasets = task.create_datasets(num_datasets=num_test_datasets, num_examples=num_examples)
-    icl_predictions = run_icl(model, tokenizer, task, test_datasets)
+    icl_predictions = run_icl(model, tokenizer, test_datasets)
     
     accuracies["icl"] = calculate_accuracy_on_datasets(task, icl_predictions, test_datasets)
     
@@ -249,7 +258,7 @@ def run_main_experiment(
 
     num_examples = 5
 
-    for i, task_name in enumerate(TASKS_TO_EVALUATE):
+    for i, task_name in enumerate(LINGUISTIC_TASKS):
         task = tasks[task_name]
         if task_name in results:
             print(f"Skipping task {i+1}/{len(tasks)}: {task_name}")
@@ -264,11 +273,6 @@ def run_main_experiment(
 
         print(f"Baseline Accuracy: {accuracies['baseline']:.2f}")
         print(f"ICL Accuracy: {accuracies['icl']:.2f}")
-        print(f"Task Vector Accuracy: {accuracies['tv']:.2f}")
-        print(f"Dev Accuracy by layer: ", end="")
-        for layer, accuracy in accuracies["tv_dev_by_layer"].items():
-            print(f"{layer}: {accuracy:.2f}, ", end="")
-        print()
         print("Time:", time.time() - tic)
 
         results[task_name] = {

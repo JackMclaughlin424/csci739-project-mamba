@@ -1,6 +1,6 @@
 import os
 
-DATA_DIR = "data"
+DATA_DIR = "experiments/icl_task_vectors/data"
 
 OUTPUTS_DIR = "outputs"
 RESULTS_DIR = os.path.join(OUTPUTS_DIR, "results")

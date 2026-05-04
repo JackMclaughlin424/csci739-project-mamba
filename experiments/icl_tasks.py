@@ -20,7 +20,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
 from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
-from experiments.icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
+from experiments.icl_task_vectors.core.data.task_helpers import get_task_by_name
 
 import random
 from typing import Any, List, Optional, Iterable
@@ -76,7 +76,9 @@ LINGUISTIC_TASKS = [
 
 
 
-
+def get_all_tasks(tokenizer: PreTrainedTokenizer) -> Dict[str, Task]:
+    tasks = {task_name: get_task_by_name(tokenizer, task_name) for task_name in LINGUISTIC_TASKS}
+    return tasks
 
 
 

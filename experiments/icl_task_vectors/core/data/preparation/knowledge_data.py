@@ -1,7 +1,7 @@
 import requests
 import json
 import os
-from experiments.icl_task_vectors.core import config
+from icl_task_vectors.core import config
 
 
 RELATIONS_TO_INCLUDE = {

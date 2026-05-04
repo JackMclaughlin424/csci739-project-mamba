@@ -7,7 +7,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTra
 from accelerate import init_empty_weights
 from accelerate.utils.modeling import infer_auto_device_map, get_balanced_memory
 
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_layers, get_layers_path
+from icl_task_vectors.core.models.utils.llm_layers import get_layers, get_layers_path
 
 BASE_KWARGS = {
     "torch_dtype": torch.float16,

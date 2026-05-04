@@ -1,7 +1,7 @@
 import os
 import pandas as pd
-from experiments.icl_task_vectors.scripts.figures.helpers import load_overriding_results
-from experiments.icl_task_vectors.core.config import FIGURES_DIR
+from icl_task_vectors.scripts.figures.helpers import load_overriding_results
+from icl_task_vectors.core.config import FIGURES_DIR
 
 
 def create_overriding_results_table(overriding_results: dict, model_name: str):

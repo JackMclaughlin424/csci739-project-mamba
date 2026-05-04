@@ -3,7 +3,7 @@ import random
 import string
 from typing import List, Literal, Iterable
 
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.task import Task
 
 
 class TokenOprationTask(Task):
@@ -18,7 +18,7 @@ class TokenOprationTask(Task):
         self.input_space = input_space
 
     def sample_inputs(self, num_inputs: int, exclude: List[str] = ()) -> List[str]:
-        return random.sample(set(self.input_space) - set(exclude), num_inputs)
+        return random.sample(sorted(set(self.input_space) - set(exclude)), num_inputs)
 
     def calc_output(self, inp) -> str:
         if self.operation == "to_upper":

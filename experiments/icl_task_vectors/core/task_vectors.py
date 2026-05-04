@@ -4,11 +4,11 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
-from experiments.icl_task_vectors.core.data.tasks.task import Task
-from experiments.icl_task_vectors.core.models.context_managers.forward_modifiers.hidden_injector import HiddenInjector
-from experiments.icl_task_vectors.core.models.utils.inference import (
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.models.context_managers.forward_modifiers.hidden_injector import HiddenInjector
+from icl_task_vectors.core.models.utils.inference import (
     batch_forward,
     batch_generate,
     decode_predictions,
@@ -17,8 +17,8 @@ from experiments.icl_task_vectors.core.models.utils.inference import (
     tokenize_datasets,
     traced_forward,
 )
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_layers
-from experiments.icl_task_vectors.core.utils.nested import nested_apply
+from icl_task_vectors.core.models.utils.llm_layers import get_layers
+from icl_task_vectors.core.utils.nested import nested_apply
 
 
 def run_icl(

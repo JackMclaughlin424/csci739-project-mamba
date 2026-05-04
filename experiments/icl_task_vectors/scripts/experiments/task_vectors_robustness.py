@@ -12,12 +12,12 @@ from scipy.spatial.distance import cdist
 from sklearn.manifold import TSNE
 from tqdm.auto import tqdm
 
-from experiments.icl_task_vectors.core.config import FIGURES_DIR
-from experiments.icl_task_vectors.core.data.task_helpers import get_task_by_name
-from experiments.icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
-from experiments.icl_task_vectors.core.task_vectors import get_task_hiddens, task_vector_accuracy_by_layer
-from experiments.icl_task_vectors.core.utils.misc import limit_gpus, seed_everything
-from experiments.icl_task_vectors.scripts.experiments.main import TASKS_TO_EVALUATE
+from icl_task_vectors.core.config import FIGURES_DIR
+from icl_task_vectors.core.data.task_helpers import get_task_by_name
+from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from icl_task_vectors.core.task_vectors import get_task_hiddens, task_vector_accuracy_by_layer
+from icl_task_vectors.core.utils.misc import limit_gpus, seed_everything
+from icl_task_vectors.scripts.main import TASKS_TO_EVALUATE
 
 
 def create_task_vectors(model, tokenizer):

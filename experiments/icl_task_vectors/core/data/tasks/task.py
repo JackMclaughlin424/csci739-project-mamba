@@ -2,7 +2,7 @@ import random
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Iterable
 
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 from transformers import PreTrainedTokenizer
 
 

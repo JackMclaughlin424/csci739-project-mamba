@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 
-from experiments.icl_task_vectors.core import config
+from icl_task_vectors.core import config
 
 load_dotenv(".env")
 

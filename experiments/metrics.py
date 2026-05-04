@@ -5,20 +5,31 @@ metrics:
 - perplexity
 - ROUGE-L
 - BLEU
--BERTScore
+- BERTScore
 
-experiments:
-- ICL
-    - present to gerund
-    - present to past
-    - singular to plural
-    - antonyms
 """
 
 import torch
 import torch.nn.functional as F
 
 from rouge_score import rouge_scorer
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from bert_score import score as bert_score
+
+
+def batch_bleu(predictions, references):
+    """Corpus BLEU-4 over paired prediction/reference lists."""
+    smoother = SmoothingFunction().method1
+    refs = [[r.split()] for r in references]
+    hyps = [p.split() for p in predictions]
+    return corpus_bleu(refs, hyps, smoothing_function=smoother)
+
+
+def batch_bertscore(predictions, references, lang="en"):
+    """Mean BERTScore F1 over paired prediction/reference lists."""
+    _, _, f1 = bert_score(predictions, references, lang=lang, verbose=False)
+    return f1.mean().item()
+
 
 
 def compute_perplexity(model, tokenizer, texts, batch_size=8, max_length=512):

@@ -1,8 +1,8 @@
 import nltk
 from transformers import PreTrainedTokenizer
 
-from experiments.icl_task_vectors.core import config
-from experiments.icl_task_vectors.core.data.tasks.mapping_task import MappingTask
+from icl_task_vectors.core import config
+from icl_task_vectors.core.data.tasks.mapping_task import MappingTask
 
 nltk.download("wordnet")
 nltk.download("omw-1.4")

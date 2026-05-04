@@ -8,9 +8,9 @@ import re
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
-from experiments.icl_task_vectors.core.config import FIGURES_DIR
+from icl_task_vectors.core.config import FIGURES_DIR
 
-from experiments.icl_task_vectors.scripts.figures.helpers import (
+from icl_task_vectors.scripts.figures.helpers import (
     MODEL_DISPLAY_NAME_MAPPING,
     load_main_results,
     extract_accuracies,

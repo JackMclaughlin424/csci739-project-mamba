@@ -2,9 +2,9 @@ import os
 import random
 import json
 from typing import Any, List, Dict
-from experiments.icl_task_vectors.core import config
+from icl_task_vectors.core import config
 
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.task import Task
 from transformers import PreTrainedTokenizer
 
 MIN_NUM_EXAMPLES = 70
@@ -58,7 +58,8 @@ class MappingTask(Task):
 
     def sample_inputs(self, num_inputs: int, exclude: List[str] = ()) -> List[str]:
         input_space = list(self.mapping.keys())
-        return random.sample(set(input_space) - set(exclude), num_inputs)
+        return random.sample(sorted(set(input_space) - set(exclude)), num_inputs)
+
 
     def calc_output(self, inp) -> str:
         return self.mapping[inp]

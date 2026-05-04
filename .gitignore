@@ -16,3 +16,7 @@ _analyze_wandb.py
 _gen_shakespeare_nb.py
 _gen_bench_nb.py
 metrics.md
+
+launch.json
+*.pt
+*.pkl

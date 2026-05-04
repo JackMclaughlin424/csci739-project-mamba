@@ -2,7 +2,7 @@ import os
 import json
 import requests
 
-from experiments.icl_task_vectors.core import config
+from icl_task_vectors.core import config
 
 
 def most_common_value(lst):

@@ -2,8 +2,8 @@ from typing import List, Optional, Dict
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_attention_layers
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.models.utils.llm_layers import get_attention_layers
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
 
 class AttentionMasker:

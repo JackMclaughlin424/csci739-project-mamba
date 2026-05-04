@@ -1,12 +1,12 @@
 import string
 from typing import Dict
 
-from experiments.icl_task_vectors.core.data.tasks.increment_task import IncrementTask
-from experiments.icl_task_vectors.core.data.tasks.list_operation_task import ListOperationTask
-from experiments.icl_task_vectors.core.data.tasks.token_operation_task import TokenOprationTask
-from experiments.icl_task_vectors.core.data.tasks.mapping_task import MappingTask
-from experiments.icl_task_vectors.core.data.tasks.translation_task import TranslationTask
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.increment_task import IncrementTask
+from icl_task_vectors.core.data.tasks.list_operation_task import ListOperationTask
+from icl_task_vectors.core.data.tasks.token_operation_task import TokenOprationTask
+from icl_task_vectors.core.data.tasks.mapping_task import MappingTask
+from icl_task_vectors.core.data.tasks.translation_task import TranslationTask
+from icl_task_vectors.core.data.tasks.task import Task
 
 from transformers import PreTrainedTokenizer
 
@@ -67,30 +67,30 @@ ALL_TASKS = {
         "task_kwargs": {"operation": "int_to_char", "input_space": list(string.digits[1:])},
     },
     # Translation
-    "translation_fr_en": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "fr_en"},
-    },
-    "translation_it_en": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "it_en"},
-    },
-    "translation_es_en": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "es_en"},
-    },
-    "translation_en_fr": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_fr"},
-    },
-    "translation_en_it": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_it"},
-    },
-    "translation_en_es": {
-        "task_type": "translation",
-        "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_es"},
-    },
+    # "translation_fr_en": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "fr_en"},
+    # },
+    # "translation_it_en": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "it_en"},
+    # },
+    # "translation_es_en": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "es_en"},
+    # },
+    # "translation_en_fr": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_fr"},
+    # },
+    # "translation_en_it": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_it"},
+    # },
+    # "translation_en_es": {
+    #     "task_type": "translation",
+    #     "task_kwargs": {"mapping_type": "translation", "mapping_name": "en_es"},
+    # },
     # Linguistic
     "linguistic_present_simple_gerund": {
         "task_type": "mapping",
@@ -117,22 +117,22 @@ ALL_TASKS = {
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"},
     },
     # Knowledge
-    "knowledge_country_capital": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "country_capital", "allow_prefix": True},
-    },
-    "knowledge_person_language": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "person_language", "allow_prefix": True},
-    },
-    "knowledge_location_continent": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_continent", "allow_prefix": True},
-    },
-    "knowledge_location_religion": {
-        "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_religion", "allow_prefix": True},
-    },
+    # "knowledge_country_capital": {
+    #     "task_type": "mapping",
+    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "country_capital", "allow_prefix": True},
+    # },
+    # "knowledge_person_language": {
+    #     "task_type": "mapping",
+    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "person_language", "allow_prefix": True},
+    # },
+    # "knowledge_location_continent": {
+    #     "task_type": "mapping",
+    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_continent", "allow_prefix": True},
+    # },
+    # "knowledge_location_religion": {
+    #     "task_type": "mapping",
+    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_religion", "allow_prefix": True},
+    # },
     # "sentiment": {
     #     "task_type": "sentiment",
     #     "task_kwargs": {"allow_prefix": True},

@@ -9,13 +9,13 @@ from typing import Any, Optional
 import pickle
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy
-from experiments.icl_task_vectors.core.config import RESULTS_DIR
-from experiments.icl_task_vectors.core.data.task_helpers import get_task_by_name
-from experiments.icl_task_vectors.core.data.tasks.task import Task
-from experiments.icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
-from experiments.icl_task_vectors.core.task_vectors import run_icl, run_overriding_task_vector
-from experiments.icl_task_vectors.core.utils.misc import seed_everything
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy
+from icl_task_vectors.core.config import RESULTS_DIR
+from icl_task_vectors.core.data.task_helpers import get_task_by_name
+from icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from icl_task_vectors.core.task_vectors import run_icl, run_overriding_task_vector
+from icl_task_vectors.core.utils.misc import seed_everything
 
 
 def is_valid_input(task: Task, inp: Any) -> bool:

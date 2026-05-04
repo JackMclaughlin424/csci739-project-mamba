@@ -1,11 +1,12 @@
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 from typing import Optional, List
 
 
 class FewShotFormat:
     def __init__(
         self,
-        example_format: str = "example:{input}->{output}",
+        example_format: str = "example:{input} : {output}",
+
         # example_format: str = "input:{input}, output:{output}",
         example_separator: str = "\n",
         task_description: Optional[str] = None,

@@ -1,6 +1,6 @@
-from experiments.icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE, TASKS_TO_EVALUATE
-from experiments.icl_task_vectors.core.models.llm_loading import load_tokenizer
-from experiments.icl_task_vectors.core.data.task_helpers import get_task_by_name
+from icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE, TASKS_TO_EVALUATE
+from icl_task_vectors.core.models.llm_loading import load_tokenizer
+from icl_task_vectors.core.data.task_helpers import get_task_by_name
 
 NUM_EXAMPLES_WARNING = 90
 

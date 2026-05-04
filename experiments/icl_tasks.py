@@ -17,10 +17,10 @@ from typing import Optional
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
-from experiments.icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
+from icl_task_vectors.core.data.task_helpers import ALL_TASKS, get_all_tasks, get_task_by_name
 
 import random
 from typing import Any, List, Optional, Iterable
@@ -31,7 +31,7 @@ import torch
 import numpy as np
 
 # our imports
-from experiments.mamba_inference import batch_generate, decode_predictions, hidden_to_logits, tokenize_datasets
+from mamba_inference import batch_generate, decode_predictions,  tokenize_datasets
 
 
 def seed_everything(seed: int):
@@ -47,36 +47,38 @@ MIN_NUM_EXAMPLES = 70
 
 DATA_DIR = "linguistic_mappings"
 
-LINGUISTIC_TASKS = [
-    {"linguistic_present_simple_gerund": {
+LINGUISTIC_TASKS = {
+    "linguistic_present_simple_gerund": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"}
-    }},
-    {"linguistic_present_simple_past_simple": {
+    },
+    "linguistic_present_simple_past_simple": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"}
-    }},
-    {"linguistic_present_simple_past_perfect": {
+    },
+    "linguistic_present_simple_past_perfect": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"}
-    }},
-    {"linguistic_singular_plural": {
+    },
+    "linguistic_singular_plural": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"}
-    }},
-    {"linguistic_plural_singular": {
+    },
+    "linguistic_plural_singular": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"}
-    }},
-    {"linguistic_antonyms": {
+    },
+    "linguistic_antonyms": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"}
-    }}
-]
+    }
+}
 
 
 
-
+# def get_all_tasks(tokenizer: PreTrainedTokenizer):
+#     tasks = {task_name: get_task_by_name(tokenizer, task_name) for task_name in LINGUISTIC_TASKS}
+#     return tasks
 
 
 
@@ -90,8 +92,10 @@ def run_icl(
     inputs = tokenize_datasets(tokenizer, test_datasets, format_dataset_kwargs=format_dataset_kwargs)
     new_ids = batch_generate(model, tokenizer, inputs=inputs, generate_kwargs={"max_new_tokens": 1})
     predictions = decode_predictions(new_ids, tokenizer)
-
+    print("Sample predictions:", predictions[:5])
+    print("Sample expected:", [d.test_output for d in test_datasets[:5]])
     return predictions
+
 
 def evaluate_task(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, task_name: str, num_examples: int) -> None:
     seed_everything(41)
@@ -143,14 +147,14 @@ def run_main_experiment(
 ) -> None:
     print("Evaluating Mamba on ICL...")
 
-    results_file = f"results/{model_type}_{model_variant}_results.pkl"
+    results_file = f"experiments/results/{model_type}_{model_variant}_results.pkl"
     os.makedirs(os.path.dirname(results_file), exist_ok=True)
 
-    if os.path.exists(results_file):
-        with open(results_file, "rb") as f:
-            results = pickle.load(f)
-    else:
-        results = {}
+    # if os.path.exists(results_file):
+    #     with open(results_file, "rb") as f:
+    #         results = pickle.load(f)
+    # else:
+    results = {}
 
     # limit_gpus(range(0, 8))
 
@@ -159,7 +163,7 @@ def run_main_experiment(
 
     num_examples = 5
 
-    for i, task_name in enumerate(LINGUISTIC_TASKS):
+    for i, task_name in enumerate(ALL_TASKS):
         task = tasks[task_name]
         if task_name in results:
             print(f"Skipping task {i+1}/{len(tasks)}: {task_name}")
@@ -192,6 +196,11 @@ def run_main_experiment(
 def main():
     import argparse
     from transformers import AutoTokenizer
+
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
     from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
     parser = argparse.ArgumentParser()
@@ -200,7 +209,7 @@ def main():
     parser.add_argument("--tokenizer_name", default="SimpleStories/SimpleStories-5M")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-
+    print("Device: " + args.device)
     payload = torch.load(args.model_path, map_location="cpu")
     cfg = MambaLMConfig(**payload["config"])
     model = MambaLMHeadModel(cfg)

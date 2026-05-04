@@ -10,12 +10,14 @@ from icl_tasks import run_main_experiment
 # Each entry supports either:
 #   model_id: str          — downloads from HuggingFace
 #   ckpt_path + tokenizer_name: str — loads a local .pt checkpoint
+
+ 
 EXPERIMENTS = [
     {
         "label": "5M_SimpleStories",
         "ssm":         {
                         "ckpt_path": "experiments/checkpoints/mamba_simplestories_5m_final.pt",
-                        "tokenizer_name": "TODO: tokenizer name or path"
+                        "tokenizer_name": "SimpleStories/SimpleStories-5M"
                         },
         "transformer": {
             "model_id": "SimpleStories/SimpleStories-5M"
@@ -25,34 +27,38 @@ EXPERIMENTS = [
         "label": "35M_SimpleStories",
         "ssm":         {
             "ckpt_path": "TODO: SSM ~130M trained on Pile"
-            ,"tokenizer_name": "TODO: tokenizer name or path"
+            ,"tokenizer_name": "SimpleStories/SimpleStories-5M"
             },
         "transformer": {"model_id": "SimpleStories/SimpleStories-35M"},
     },
+
+# Mamba (state-spaces) vs Pythia (EleutherAI) — both trained on the Pile with 300B tokens.
+# The Mamba paper explicitly used Pythia as the transformer baseline, so these are
+# as apples-to-apples as it gets for SSM vs transformer comparisons.
     {
         "label": "~130M_pile",
-        "ssm":         {"model_id": "TODO: SSM ~130M trained on Pile"},
-        "transformer": {"model_id": "TODO: Transformer ~130M trained on Pile"},
+        "ssm":         {"model_id": "state-spaces/mamba-130m-hf"},   # 130M
+        "transformer": {"model_id": "EleutherAI/pythia-160m"},        # 160M
     },
     {
         "label": "~370M_pile",
-        "ssm":         {"model_id": "TODO: SSM ~370M trained on Pile"},
-        "transformer": {"model_id": "TODO: Transformer ~370M trained on Pile"},
+        "ssm":         {"model_id": "state-spaces/mamba-370m-hf"},    # 370M
+        "transformer": {"model_id": "EleutherAI/pythia-410m"},        # 410M
     },
     {
         "label": "~790M_pile",
-        "ssm":         {"model_id": "TODO: SSM ~790M trained on Pile"},
-        "transformer": {"model_id": "TODO: Transformer ~790M trained on Pile"},
+        "ssm":         {"model_id": "state-spaces/mamba-790m-hf"},    # 790M
+        "transformer": {"model_id": "EleutherAI/pythia-1b"},          # 1B
     },
     {
         "label": "~1.4B_pile",
-        "ssm":         {"model_id": "TODO: SSM ~1.4B trained on Pile"},
-        "transformer": {"model_id": "TODO: Transformer ~1.4B trained on Pile"},
+        "ssm":         {"model_id": "state-spaces/mamba-1.4b-hf"},    # 1.4B
+        "transformer": {"model_id": "EleutherAI/pythia-1.4b"},        # 1.4B (exact match)
     },
     {
         "label": "~2.8B_pile",
-        "ssm":         {"model_id": "TODO: SSM ~2.8B trained on Pile"},
-        "transformer": {"model_id": "TODO: Transformer ~2.8B trained on Pile"},
+        "ssm":         {"model_id": "state-spaces/mamba-2.8b-hf"},    # 2.8B
+        "transformer": {"model_id": "EleutherAI/pythia-2.8b"},        # 2.8B (exact match)
     },
 ]
 

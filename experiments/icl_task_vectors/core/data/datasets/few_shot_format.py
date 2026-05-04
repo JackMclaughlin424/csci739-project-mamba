@@ -10,7 +10,7 @@ class FewShotFormat:
         # example_format: str = "input:{input}, output:{output}",
         example_separator: str = "\n",
         task_description: Optional[str] = None,
-        test_example_format: Optional[str] = "example:{input}->",
+        test_example_format: Optional[str] = "example:{input} :",
         # test_example_format: Optional[str] = "input:{input}, output:",
     ):
         self.example_format = example_format

@@ -103,9 +103,10 @@ def load_hf_model(model_name: str, device: str = "cpu"):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
-    model.tie_weights()
     model.to(device)
 
+    if getattr(model.config, "tie_word_embeddings", True):
+        model.tie_weights()
     model.eval()
     # Verify embedding weight tying only for Mamba-style models that use backbone.embeddings
     if hasattr(model, "backbone") and hasattr(model.backbone, "embeddings"):

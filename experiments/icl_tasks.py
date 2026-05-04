@@ -31,7 +31,7 @@ import torch
 import numpy as np
 
 # our imports
-from experiments.mamba_inference import batch_generate, decode_predictions, hidden_to_logits, tokenize_datasets
+from experiments.mamba_inference import batch_generate, decode_predictions,  tokenize_datasets
 
 
 def seed_everything(seed: int):

@@ -88,6 +88,18 @@ class MambaBlockTPU(nn.Module):
         self.x_dt_proj = nn.Linear(config.d_model, config.dt_rank, bias=False)
         self.dt_proj   = nn.Linear(config.dt_rank, config.d_model, bias=True)
 
+        # Decode-time cache for A_neg = -exp(A_log.float()). Computed lazily
+        # in step() and reused across tokens so the per-step exp+mul kernel
+        # launch (~10µs on CUDA, repeated 100+ times per generation) is
+        # paid once. Invalidated on train()/eval() and on device move.
+        self._A_neg_exp_cache = None
+
+    def train(self, mode: bool = True):
+        # Drop the cache so any A_log update during training doesn't
+        # silently leak through subsequent eval() calls.
+        self._A_neg_exp_cache = None
+        return super().train(mode)
+
     # ── Inference cache helpers ─────────────────────────────────────────────
 
     def allocate_inference_cache(self, batch_size: int, dtype, device):
@@ -156,7 +168,12 @@ class MambaBlockTPU(nn.Module):
         B_proj = self.x_B_proj(x_conv)                            # (B, N)
         C_proj = self.x_C_proj(x_conv)                            # (B, N)
         dt     = F.softplus(self.dt_proj(self.x_dt_proj(x_conv))) # (B, D)
-        A      = -torch.exp(self.A_log.float())                   # (D, N)
+        # A is parameter-stationary at inference; cache the exp+negate
+        # so we don't relaunch the kernel per token.
+        if (self._A_neg_exp_cache is None
+                or self._A_neg_exp_cache.device != self.A_log.device):
+            self._A_neg_exp_cache = -torch.exp(self.A_log.float())
+        A = self._A_neg_exp_cache                                  # (D, N)
 
         dA  = torch.exp(torch.clamp(
             dt.float().unsqueeze(-1) * A,                          # (B, D, N)

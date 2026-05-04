@@ -66,8 +66,14 @@ class MambaBlock(nn.Module):
         # Projects dt to d_model
         self.dt_proj = nn.Linear(config.dt_rank, config.d_model, bias=True)
 
+        # Decode-time cache for A_neg = -exp(A_log.float()). Computed lazily
+        # in step() so the per-token kernel launch (~10µs) is amortized.
+        # Invalidated on train()/eval() and on device move.
+        self._A_neg_exp_cache = None
 
-
+    def train(self, mode: bool = True):
+        self._A_neg_exp_cache = None
+        return super().train(mode)
 
     def allocate_inference_cache(self, batch_size, dtype, device):
         conv_state = torch.zeros(batch_size, self.config.d_model, self.config.kernel_size,
@@ -112,7 +118,10 @@ class MambaBlock(nn.Module):
         dt     = F.softplus(self.dt_proj(self.x_dt_proj(x_conv)))  # (B, d_model)
 
         # Discretize + SSM update in fp32 for numerical stability
-        A   = -torch.exp(self.A_log.float())                        # (d_model, d_state)
+        if (self._A_neg_exp_cache is None
+                or self._A_neg_exp_cache.device != self.A_log.device):
+            self._A_neg_exp_cache = -torch.exp(self.A_log.float())
+        A = self._A_neg_exp_cache                                   # (d_model, d_state)
         dA  = torch.exp(dt.float().unsqueeze(-1) * A)               # (B, d_model, d_state)
         dBu = (dt.float().unsqueeze(-1)
                * B_proj.float().unsqueeze(1)

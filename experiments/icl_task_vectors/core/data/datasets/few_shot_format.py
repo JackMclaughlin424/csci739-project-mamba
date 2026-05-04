@@ -1,4 +1,4 @@
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 from typing import Optional, List
 
 

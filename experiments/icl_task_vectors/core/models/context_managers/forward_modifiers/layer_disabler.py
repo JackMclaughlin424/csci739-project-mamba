@@ -2,7 +2,7 @@ from typing import Iterable
 
 from torch import nn
 from transformers import PreTrainedModel
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_layers, get_layers_path, set_nested_attr
+from icl_task_vectors.core.models.utils.llm_layers import get_layers, get_layers_path, set_nested_attr
 
 
 class LayerDisabler:

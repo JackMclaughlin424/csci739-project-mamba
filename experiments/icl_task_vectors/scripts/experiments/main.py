@@ -11,16 +11,16 @@ from typing import Optional
 
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from experiments.icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
+from icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
 
-from experiments.icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
-from experiments.icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
-from experiments.icl_task_vectors.core.models.utils.inference import hidden_to_logits
-from experiments.icl_task_vectors.core.analysis.utils import logits_top_tokens
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
-from experiments.icl_task_vectors.core.task_vectors import run_icl, run_task_vector
-from experiments.icl_task_vectors.core.utils.misc import limit_gpus, seed_everything
-from experiments.icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE, TASKS_TO_EVALUATE
+from icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
+from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from icl_task_vectors.core.models.utils.inference import hidden_to_logits
+from icl_task_vectors.core.analysis.utils import logits_top_tokens
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from icl_task_vectors.core.task_vectors import run_icl, run_task_vector
+from icl_task_vectors.core.utils.misc import limit_gpus, seed_everything
+from icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE, TASKS_TO_EVALUATE
 
 
 def get_results_file_path(model_type: str, model_variant: str, experiment_id: str = "") -> str:

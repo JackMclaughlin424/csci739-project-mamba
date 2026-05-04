@@ -4,8 +4,8 @@ import torch
 
 from transformers import PreTrainedModel
 
-from experiments.icl_task_vectors.core.models.context_managers.tracing.forward_trace import ForwardTrace, ResidualStream
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_embedding_layer, get_layers, get_attention_layers, get_mlp_layers
+from icl_task_vectors.core.models.context_managers.tracing.forward_trace import ForwardTrace, ResidualStream
+from icl_task_vectors.core.models.utils.llm_layers import get_embedding_layer, get_layers, get_attention_layers, get_mlp_layers
 
 
 class ForwardTracer:

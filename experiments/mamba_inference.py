@@ -3,8 +3,8 @@ from typing import Dict, List, Optional
 import torch
 from transformers import PreTrainedTokenizer
 
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
-from experiments.icl_task_vectors.core.data.datasets.few_shot_format import FewShotFormat
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.datasets.few_shot_format import FewShotFormat
 
 
 
@@ -19,7 +19,10 @@ def tokenize_datasets(
     prompts = few_shot_format.format_datasets(datasets, **format_dataset_kwargs)
     # Left-pad so position -1 always corresponds to the last real token.
     tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     return tokenizer(prompts, return_tensors="pt", padding=True, return_token_type_ids=False)
+
 
 
 def batch_generate(

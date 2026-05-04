@@ -1,5 +1,5 @@
 import os
-from experiments.icl_task_vectors.core.config import RESULTS_DIR
+from icl_task_vectors.core.config import RESULTS_DIR
 
 MAIN_RESULTS_DIR = os.path.join(RESULTS_DIR, "main")
 OVERRIDING_RESULTS_DIR = os.path.join(RESULTS_DIR, "overriding")

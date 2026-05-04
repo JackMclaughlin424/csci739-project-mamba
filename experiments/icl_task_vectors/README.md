@@ -31,7 +31,7 @@ python scripts/data/prepare_data.py
 To run the main experiment on the models and tasks defined in [core/experiments_config.py](core/experiments_config.py),
 run the following command:
 ```
-./run_script.sh experiments.main
+./run_script.sh main
 ```
 This will run the python file [scripts/experiments/main.py](scripts/experiments/main.py).
 The results will be saved to `outputs/results/main/<experiment_id>`, in a separate file for each model.
@@ -47,7 +47,7 @@ The figures will be saved to `outputs/figures`.
 ### Running the Experiment
 To run the conflicting tasks experiment, run the following command:
 ```
-./run_script.sh experiments.overriding
+./run_script.sh overriding
 ```
 This will run the python file [scripts/experiments/overriding.py](scripts/experiments/overriding.py).
 The results will be saved to `outputs/results/overriding`, in a separate file for each model.
@@ -62,7 +62,7 @@ The figures will be saved to `outputs/figures`.
 ## Task Vector Robustness Experiment
 To run the task vector robustness experiment, and generate the figures from the paper, run the following command:
 ```
-./run_script.sh experiments.task_vector_robustness
+./run_script.sh task_vector_robustness
 ```
 This will run the python file [scripts/experiments/task_vector_robustness.py](scripts/experiments/task_vector_robustness.py).
 The figures will be saved to `outputs/figures`.

@@ -7,14 +7,14 @@ from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
-from experiments.icl_task_vectors.core.data.datasets.few_shot_format import FewShotFormat
-from experiments.icl_task_vectors.core.models.context_managers.tracing.forward_trace import ForwardTrace
-from experiments.icl_task_vectors.core.models.context_managers.tracing.forward_tracer import ForwardTracer
-from experiments.icl_task_vectors.core.models.context_managers.utils import CombinedContextManager
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_lm_pipeline
-from experiments.icl_task_vectors.core.utils.misc import get_nested_tensor_size
-from experiments.icl_task_vectors.core.utils.nested import nested_apply, nested_concat
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.datasets.few_shot_format import FewShotFormat
+from icl_task_vectors.core.models.context_managers.tracing.forward_trace import ForwardTrace
+from icl_task_vectors.core.models.context_managers.tracing.forward_tracer import ForwardTracer
+from icl_task_vectors.core.models.context_managers.utils import CombinedContextManager
+from icl_task_vectors.core.models.utils.llm_layers import get_lm_pipeline
+from icl_task_vectors.core.utils.misc import get_nested_tensor_size
+from icl_task_vectors.core.utils.nested import nested_apply, nested_concat
 
 
 def traced_forward(

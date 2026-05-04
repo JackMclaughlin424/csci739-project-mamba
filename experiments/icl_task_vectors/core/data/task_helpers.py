@@ -1,12 +1,12 @@
 import string
 from typing import Dict
 
-from experiments.icl_task_vectors.core.data.tasks.increment_task import IncrementTask
-from experiments.icl_task_vectors.core.data.tasks.list_operation_task import ListOperationTask
-from experiments.icl_task_vectors.core.data.tasks.token_operation_task import TokenOprationTask
-from experiments.icl_task_vectors.core.data.tasks.mapping_task import MappingTask
-from experiments.icl_task_vectors.core.data.tasks.translation_task import TranslationTask
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.increment_task import IncrementTask
+from icl_task_vectors.core.data.tasks.list_operation_task import ListOperationTask
+from icl_task_vectors.core.data.tasks.token_operation_task import TokenOprationTask
+from icl_task_vectors.core.data.tasks.mapping_task import MappingTask
+from icl_task_vectors.core.data.tasks.translation_task import TranslationTask
+from icl_task_vectors.core.data.tasks.task import Task
 
 from transformers import PreTrainedTokenizer
 

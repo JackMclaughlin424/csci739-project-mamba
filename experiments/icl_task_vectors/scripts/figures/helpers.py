@@ -3,7 +3,7 @@ import pickle
 import pandas as pd
 
 
-from experiments.icl_task_vectors.scripts.utils import main_experiment_results_dir, overriding_experiment_results_dir
+from icl_task_vectors.scripts.utils import main_experiment_results_dir, overriding_experiment_results_dir
 
 MODEL_DISPLAY_NAME_MAPPING = {
     "llama_7B": "LLaMA 7B",

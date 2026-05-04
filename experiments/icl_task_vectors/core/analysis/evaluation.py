@@ -2,8 +2,8 @@ from typing import List
 
 import numpy as np
 
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.data.tasks.task import Task
 
 
 def calculate_accuracy(task: Task, predictions: List[str], expected_outputs: List[str]) -> List[bool]:

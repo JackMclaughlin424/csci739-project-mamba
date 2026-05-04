@@ -1,9 +1,9 @@
 from dotenv import load_dotenv
-from experiments.icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE
+from icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE
 
 load_dotenv(".env")
 
-from experiments.icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
 
 
 def main():

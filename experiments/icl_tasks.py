@@ -17,10 +17,10 @@ from typing import Optional
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
-from experiments.icl_task_vectors.core.data.task_helpers import get_task_by_name
+from icl_task_vectors.core.data.task_helpers import get_task_by_name
 
 import random
 from typing import Any, List, Optional, Iterable
@@ -31,7 +31,7 @@ import torch
 import numpy as np
 
 # our imports
-from experiments.mamba_inference import batch_generate, decode_predictions,  tokenize_datasets
+from mamba_inference import batch_generate, decode_predictions,  tokenize_datasets
 
 
 def seed_everything(seed: int):
@@ -92,8 +92,10 @@ def run_icl(
     inputs = tokenize_datasets(tokenizer, test_datasets, format_dataset_kwargs=format_dataset_kwargs)
     new_ids = batch_generate(model, tokenizer, inputs=inputs, generate_kwargs={"max_new_tokens": 1})
     predictions = decode_predictions(new_ids, tokenizer)
-
+    print("Sample predictions:", predictions[:5])
+    print("Sample expected:", [d.test_output for d in test_datasets[:5]])
     return predictions
+
 
 def evaluate_task(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, task_name: str, num_examples: int) -> None:
     seed_everything(41)
@@ -145,7 +147,7 @@ def run_main_experiment(
 ) -> None:
     print("Evaluating Mamba on ICL...")
 
-    results_file = f"results/{model_type}_{model_variant}_results.pkl"
+    results_file = f"experiments/results/{model_type}_{model_variant}_results.pkl"
     os.makedirs(os.path.dirname(results_file), exist_ok=True)
 
     if os.path.exists(results_file):
@@ -194,6 +196,11 @@ def run_main_experiment(
 def main():
     import argparse
     from transformers import AutoTokenizer
+
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
     from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
     parser = argparse.ArgumentParser()

@@ -4,7 +4,7 @@ from typing import Iterable, List
 
 from transformers import PreTrainedTokenizer
 
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.task import Task
 
 
 def _unicode_range(start: str, num: int) -> List[str]:

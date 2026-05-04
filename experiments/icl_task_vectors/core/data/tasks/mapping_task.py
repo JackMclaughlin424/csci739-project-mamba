@@ -2,9 +2,9 @@ import os
 import random
 import json
 from typing import Any, List, Dict
-from experiments.icl_task_vectors.core import config
+from icl_task_vectors.core import config
 
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.task import Task
 from transformers import PreTrainedTokenizer
 
 MIN_NUM_EXAMPLES = 70

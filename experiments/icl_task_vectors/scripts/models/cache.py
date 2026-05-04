@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 
-from experiments.icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE
+from icl_task_vectors.core.experiments_config import MODELS_TO_EVALUATE
 
 load_dotenv(".env")
 
@@ -12,7 +12,7 @@ import schedule
 import torch
 from tqdm.auto import tqdm
 
-from experiments.icl_task_vectors.core.models.llm_loading import get_local_path
+from icl_task_vectors.core.models.llm_loading import get_local_path
 
 
 def cache_directory(directory: str):

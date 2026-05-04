@@ -1,7 +1,7 @@
 import torch
 from transformers import PreTrainedModel
 
-from experiments.icl_task_vectors.core.models.utils.llm_layers import get_layers
+from icl_task_vectors.core.models.utils.llm_layers import get_layers
 
 
 class HiddenInjector:

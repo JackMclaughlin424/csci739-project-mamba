@@ -1,6 +1,6 @@
-from experiments.icl_task_vectors.core.data.preparation.knowledge_data import prepare_knowledge_data
-from experiments.icl_task_vectors.core.data.preparation.linguistic_data import prepare_linguistic_data
-from experiments.icl_task_vectors.core.data.preparation.translation_data import prepare_translation_data
+from icl_task_vectors.core.data.preparation.knowledge_data import prepare_knowledge_data
+from icl_task_vectors.core.data.preparation.linguistic_data import prepare_linguistic_data
+from icl_task_vectors.core.data.preparation.translation_data import prepare_translation_data
 
 
 def prepare_data():

@@ -3,7 +3,7 @@ import random
 import string
 from typing import List, Literal, Iterable
 
-from experiments.icl_task_vectors.core.data.tasks.task import Task
+from icl_task_vectors.core.data.tasks.task import Task
 
 
 class ListOperationTask(Task):

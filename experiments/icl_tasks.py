@@ -145,7 +145,7 @@ def run_main_experiment(
     tokenizer,
     model_type = "mamba", model_variant = "5m"
 ) -> None:
-    print("Evaluating Mamba on ICL...")
+    print(f"Evaluating {model_type}_{model_variant} on ICL...")
 
     results_file = f"experiments/results/{model_type}_{model_variant}_results.pkl"
     os.makedirs(os.path.dirname(results_file), exist_ok=True)

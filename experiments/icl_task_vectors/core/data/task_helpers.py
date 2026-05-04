@@ -117,22 +117,22 @@ ALL_TASKS = {
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"},
     },
     # Knowledge
-    # "knowledge_country_capital": {
-    #     "task_type": "mapping",
-    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "country_capital", "allow_prefix": True},
-    # },
-    # "knowledge_person_language": {
-    #     "task_type": "mapping",
-    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "person_language", "allow_prefix": True},
-    # },
-    # "knowledge_location_continent": {
-    #     "task_type": "mapping",
-    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_continent", "allow_prefix": True},
-    # },
-    # "knowledge_location_religion": {
-    #     "task_type": "mapping",
-    #     "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_religion", "allow_prefix": True},
-    # },
+    "knowledge_country_capital": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "country_capital", "allow_prefix": True},
+    },
+    "knowledge_person_language": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "person_language", "allow_prefix": True},
+    },
+    "knowledge_location_continent": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_continent", "allow_prefix": True},
+    },
+    "knowledge_location_religion": {
+        "task_type": "mapping",
+        "task_kwargs": {"mapping_type": "knowledge", "mapping_name": "location_religion", "allow_prefix": True},
+    },
     # "sentiment": {
     #     "task_type": "sentiment",
     #     "task_kwargs": {"allow_prefix": True},

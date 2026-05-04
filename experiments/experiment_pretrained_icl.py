@@ -16,21 +16,22 @@ EXPERIMENTS = [
     {
         "label": "5M_SimpleStories",
         "ssm":         {
-                        "ckpt_path": "experiments/checkpoints/mamba_simplestories_5m_final.pt",
-                        "tokenizer_name": "SimpleStories/SimpleStories-5M"
+                        # "ckpt_path": "experiments/checkpoints/mamba_simplestories_5m_final.pt"
+                        "ckpt_path": "/content/drive/MyDrive/csci739_GenAI_topics/project_resources/mamba_simplestories_5m_final.pt"
+                        ,"tokenizer_name": "SimpleStories/SimpleStories-5M"
                         },
         "transformer": {
             "model_id": "SimpleStories/SimpleStories-5M"
             },
     },
-    {
-        "label": "35M_SimpleStories",
-        "ssm":         {
-            "ckpt_path": "TODO: SSM ~130M trained on Pile"
-            ,"tokenizer_name": "SimpleStories/SimpleStories-5M"
-            },
-        "transformer": {"model_id": "SimpleStories/SimpleStories-35M"},
-    },
+    # {
+    #     "label": "35M_SimpleStories",
+    #     "ssm":         {
+    #         "ckpt_path": "TODO: SSM ~130M trained on Pile"
+    #         ,"tokenizer_name": "SimpleStories/SimpleStories-5M"
+    #         },
+    #     "transformer": {"model_id": "SimpleStories/SimpleStories-35M"},
+    # },
 
 # Mamba (state-spaces) vs Pythia (EleutherAI) — both trained on the Pile with 300B tokens.
 # The Mamba paper explicitly used Pythia as the transformer baseline, so these are

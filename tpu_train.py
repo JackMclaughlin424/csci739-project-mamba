@@ -21,18 +21,24 @@ over width.
 Pass --n_layer 6 --d_model 768 for the depth-matched (E=3) variant if you
 want to isolate "depth or architecture wins?" in the comparison study.
 
-Hardware: single-host TPU v4-8 or v6e-{1,4,8}. Multi-core is launched via
-`xmp.spawn` (set --multi_device). Falls back to CUDA / CPU when torch_xla
-is missing, so the same script is used for local development and TPU runs.
+Hardware: single-host TPU v4-8 / v6e-{1,4,8} (SPMD across all cores in a
+SINGLE Python process — no xmp.spawn). Falls back to CUDA / CPU when
+torch_xla is missing, so the same script runs in local dev and on TPU.
 
 Single-device (CPU / single TPU core / dev):
     python tpu_train.py
 
-Multi-device on a TPU v4-8 or v6e-8:
+Multi-device on TPU (single Python process, GSPMD partitioner shards the
+global batch across all available cores):
     PJRT_DEVICE=TPU python tpu_train.py --multi_device
 
-Multi-device on v6e-4:
-    PJRT_DEVICE=TPU python tpu_train.py --multi_device
+Why SPMD over xmp.spawn:
+    * One Python interpreter (not N) — shared in-process XLA compile cache
+    * No per-rank cold-compile cost (~770 s × N saved)
+    * args.batch_size is per-device; the script multiplies by num_devices
+      for the DataLoader so the global batch is correctly assembled, then
+      mark_sharding(batch, mesh, ('data', None)) re-distributes per device
+    * Required to scale beyond a single host (TPU pods are SPMD only)
 
 XLA best practices applied (see `mamba/xla_tpu_reference.md`):
     * MpDeviceLoader (§2.4) — async host→device prefetch
@@ -41,10 +47,10 @@ XLA best practices applied (see `mamba/xla_tpu_reference.md`):
     * On-device NaN guard (§9.3) — no per-step .item() on isfinite checks
     * Diagnostics computed every step, transferred only at log_interval (§9.4)
     * int32 stored token ids (§8.2) — cast to long only at the embedding
-    * SPMD safety (§6.1) — every device runs the same forward; only side
-      effects (download, save, log) are master-gated
-    * Dataset preparation barrier (§6.5) — non-master ranks wait for the
-      master to tokenize and cache, then all ranks load from disk
+    * GSPMD batch sharding — mark_sharding(batch, mesh, ('data', None))
+      replicates model + shards data dim across all XLA devices
+    * model.step graph pre-compiled at startup so end-of-epoch sample
+      generation doesn't pay a cold-compile stall mid-training
 
 Optional environment variables for TPU launches:
     PJRT_DEVICE=TPU
@@ -94,6 +100,20 @@ except ImportError:
     SyncfreeAdamW = torch.optim.AdamW
     xm = met = pl = None  # type: ignore
     _xla_world_size = _xla_process_index = _xla_is_master = _xla_device = None  # type: ignore
+
+# SPMD detection — torch_xla 2.0+ ships the GSPMD partitioner under
+# `torch_xla.distributed.spmd`. Required for the single-process / mark-
+# sharding execution model that replaced `xmp.spawn` in this script.
+HAS_SPMD = False
+xs = None  # type: ignore
+if HAS_XLA:
+    try:
+        import torch_xla.distributed.spmd as _xs
+        if hasattr(xr, "use_spmd") and hasattr(_xs, "Mesh") and hasattr(_xs, "mark_sharding"):
+            xs = _xs
+            HAS_SPMD = True
+    except ImportError:
+        HAS_SPMD = False
 
 # ─── Optional dependencies for HF data loading ───────────────────────────────
 try:
@@ -287,6 +307,46 @@ def _topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, k: int) -> torch
     return (topk == targets.unsqueeze(-1)).any(-1).float().mean()
 
 
+def _precompile_step_graph(model, device, log) -> float:
+    """Trigger XLA compilation of `model.step()` at startup.
+
+    The end-of-epoch sample-generation path uses `model.step()`, which is a
+    DIFFERENT XLA HLO from `model.forward()` and so doesn't share the
+    in-process compilation cache built up by training. The first time the
+    sampler hits `model.step()` is mid-training, and on torch_xla 2.9 (where
+    the persistent disk cache is broken — pytorch/xla#9094) this causes a
+    visible ~30s stall.
+
+    Compiling a single step() up front amortises that into startup time,
+    where the user is already waiting for the script to begin.
+
+    Returns the wall-time the compile took (for logging).
+    """
+    import time as _time
+    t0 = _time.time()
+    with torch.no_grad():
+        was_training = model.training
+        model.eval()
+        try:
+            dummy = torch.zeros(1, dtype=torch.long, device=device)
+            caches = model.allocate_inference_cache(
+                batch_size=1, dtype=torch.float32, device=device,
+            )
+            logits, _ = model.step(dummy, caches)
+            # Force materialisation so the compile actually fires.
+            if HAS_XLA:
+                xm.mark_step()
+                # One on-device read forces the compiled program to execute,
+                # ensuring the cache entry is fully realised before training.
+                _ = float(logits.float().sum().cpu())
+            else:
+                _ = float(logits.float().sum().cpu())
+        finally:
+            if was_training:
+                model.train()
+    return _time.time() - t0
+
+
 def _gumbel_top_k_sample(logits: torch.Tensor, *,
                          temperature: float, top_k: int) -> torch.Tensor:
     """Categorical sample from logits — XLA-safe.
@@ -365,6 +425,99 @@ def _generate_sample(model, tokenizer, prompt: str, *,
 
     model.train()
     return tokenizer.decode(ids + out_ids, skip_special_tokens=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inference benchmark (Mamba's selling point: O(1) decode + tiny state)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def _benchmark_inference(model, cfg, device, *,
+                         prefill_lens=(128, 512, 1024),
+                         decode_tokens: int = 128,
+                         batch_size: int = 1) -> dict:
+    """Measure prefill throughput, decode throughput, and inference state size.
+
+    The Mamba selling-point vs the SimpleStories transformer baseline is
+    O(1) per-token decode (the SSM state is fixed-size; no growing KV cache)
+    and tiny inference memory (constant in sequence length). This function
+    quantifies both, with results comparable across model architectures.
+
+    Numbers are single-stream (batch=1) — the realistic chat-serving case.
+    Under SPMD the work runs replicated across all devices; reported
+    latency reflects what one device sees, which is the right metric for
+    serving one user's stream.
+
+    Returns a flat dict with keys:
+        inference/prefill_L{N}_tps           tokens/sec for an N-token prefill
+        inference/prefill_L{N}_latency_ms    end-to-end prefill latency
+        inference/decode_tps                 autoregressive tokens/sec
+        inference/decode_latency_ms          mean per-token decode latency
+        inference/state_bytes                inference state per batch slot
+        inference/state_bytes_per_layer      same, divided by n_layer
+
+    Mamba state size is `n_layer × B × d_model × (kernel_size + d_state) × 4`
+    (fp32 SSM state + fp32 conv state). For comparison, a transformer's KV
+    cache is `n_layer × 2 × B × n_kv × d_head × seq_len × dtype_bytes` —
+    grows linearly in seq_len. Mamba's stays constant; that's the win.
+    """
+    was_training = model.training
+    model.eval()
+    results: dict = {}
+
+    def _sync():
+        if HAS_XLA:
+            xm.mark_step()
+            xm.wait_device_ops()
+
+    # ── Prefill throughput at multiple sequence lengths ────────────────────
+    for L in prefill_lens:
+        if L > cfg.seq_len:
+            continue
+        x = torch.zeros(batch_size, L, dtype=torch.long, device=device)
+        # Warmup (compiles the graph if it's the first time at this shape).
+        _ = model(x); _sync()
+        # Time multiple iters for a stable estimate.
+        n_iter = 5
+        t0 = time.time()
+        for _ in range(n_iter):
+            _ = model(x)
+        _sync()
+        elapsed = time.time() - t0
+        tps = (batch_size * L * n_iter) / max(elapsed, 1e-9)
+        per_call_ms = (elapsed / n_iter) * 1000.0
+        results[f"inference/prefill_L{L}_tps"] = tps
+        results[f"inference/prefill_L{L}_latency_ms"] = per_call_ms
+
+    # ── Decode throughput (autoregressive O(1) step) ───────────────────────
+    caches = model.allocate_inference_cache(
+        batch_size=batch_size, dtype=torch.float32, device=device,
+    )
+    next_token = torch.zeros(batch_size, dtype=torch.long, device=device)
+    # Warmup so the step graph is compiled (or cache-hit if pre-compile ran).
+    _, caches = model.step(next_token, caches); _sync()
+    t0 = time.time()
+    for _ in range(decode_tokens):
+        _, caches = model.step(next_token, caches)
+    _sync()
+    elapsed = time.time() - t0
+    decode_tps = (batch_size * decode_tokens) / max(elapsed, 1e-9)
+    decode_latency_ms = (elapsed / decode_tokens) * 1000.0
+    results["inference/decode_tps"] = decode_tps
+    results["inference/decode_latency_ms"] = decode_latency_ms
+
+    # ── Inference state size (analytic; doesn't depend on seq_len) ────────
+    # Per layer: conv_state (B, d_model, kernel_size) + ssm_state (B, d_model, d_state)
+    # Both stored fp32 in our impl (4 bytes/elem).
+    bytes_per_layer = batch_size * cfg.d_model * (cfg.kernel_size + cfg.d_state) * 4
+    total_state_bytes = bytes_per_layer * cfg.n_layer
+    results["inference/state_bytes"] = total_state_bytes
+    results["inference/state_bytes_per_layer"] = bytes_per_layer
+    results["inference/state_kb"] = total_state_bytes / 1024.0
+
+    if was_training:
+        model.train()
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -586,7 +739,8 @@ def prepare_dataset(args, is_master: bool, world_size: int):
         2. wandb artifact (downloaded into the cache file path)
         3. tokenize from scratch and write to the cache file
 
-    SPMD-safe: all ranks rendezvous before reading the cache.
+    SPMD-safe: single Python process — no inter-process rendezvous needed.
+    `is_master` and `world_size` are accepted for API stability but ignored.
 
     Returns: (train, val, vocab_size, eos_id, bytes_per_token, freshly_tokenized)
     `freshly_tokenized` tells the caller whether the cache was just produced
@@ -601,10 +755,7 @@ def prepare_dataset(args, is_master: bool, world_size: int):
             _tokenize_and_cache(args, cache_path)
             freshly_tokenized = True
 
-    # All ranks meet here; non-master waited while master prepped the cache.
-    if HAS_XLA and world_size > 1:
-        xm.rendezvous("dataset_ready")
-
+    # No cross-process rendezvous needed — single Python process under SPMD.
     obj = torch.load(cache_path, map_location="cpu", weights_only=False)
     schema = obj.get("schema_version", 1)
     if schema != 3:
@@ -663,21 +814,47 @@ class PackedTokenDataset(Dataset):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(args, rank: int = 0):
-    """Entry point. Call directly (single-device) or via xmp.spawn (multi-device)."""
+    """Entry point — single Python process under SPMD (or single device).
+
+    With `--multi_device`: SPMD is enabled in main() before this is called,
+    a 1D data-parallel mesh is built here, and the global batch is sharded
+    along the data dim across all available XLA devices. Single-process
+    execution means the in-process XLA compilation cache is shared by all
+    cores; there is no per-rank Python interpreter overhead.
+    """
 
     # ── Device & master ────────────────────────────────────────────────────
     if HAS_XLA:
-        device     = _xla_device()
-        is_master  = _xla_is_master()
-        world_size = _xla_world_size()
+        device      = _xla_device()
+        is_master   = _xla_is_master()      # True under SPMD (single proc)
+        # Under SPMD, _xla_world_size() == 1 (one Python process), but the
+        # *effective* parallelism is num_devices. Use num_devices everywhere
+        # token accounting / scheduling needs the parallelism factor.
+        spmd_active = HAS_SPMD and bool(getattr(args, "multi_device", False)) \
+                      and (xr.is_spmd() if hasattr(xr, "is_spmd") else True)
+        if spmd_active:
+            num_devices = xr.global_runtime_device_count()
+        else:
+            num_devices = _xla_world_size()
+        world_size = num_devices
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         is_master = True
         world_size = 1
+        num_devices = 1
+        spmd_active = False
 
     def log(msg):
         if is_master:
             print(msg, flush=True)
+
+    # Build the SPMD mesh once and reuse for every batch's mark_sharding call.
+    spmd_mesh = None
+    if spmd_active:
+        import numpy as _np
+        device_ids = _np.arange(num_devices)
+        spmd_mesh = xs.Mesh(device_ids, (num_devices,), ("data",))
+        log(f"SPMD enabled — mesh ('data',) over {num_devices} XLA devices")
 
     # ── wandb: master-only initialisation guard ────────────────────────────
     # Resolve once and cache; everything else just checks `wandb_enabled`.
@@ -718,34 +895,31 @@ def train(args, rank: int = 0):
     train_ds = PackedTokenDataset(train_data)
     val_ds   = PackedTokenDataset(val_data)
 
-    # On multi-device, shard the dataset deterministically per rank.
-    if HAS_XLA and world_size > 1:
-        from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(
-            train_ds, num_replicas=world_size, rank=rank,
-            shuffle=True, drop_last=True, seed=args.seed,
-        )
-        val_sampler = DistributedSampler(
-            val_ds, num_replicas=world_size, rank=rank,
-            shuffle=False, drop_last=True,
-        )
-    else:
-        train_sampler = val_sampler = None
+    # Under SPMD the DataLoader produces a GLOBAL batch (per-device × N) and
+    # the GSPMD partitioner shards along the data dim — no DistributedSampler
+    # required (single Python process, single iterator). args.batch_size is
+    # interpreted as the per-device batch so token accounting (which uses
+    # world_size = num_devices) stays unchanged from the xmp.spawn era.
+    global_batch = args.batch_size * num_devices
 
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
+        train_ds, batch_size=global_batch,
+        shuffle=True,
         drop_last=True, num_workers=args.num_workers,
-        pin_memory=True,
+        # pin_memory only helps CPU→CUDA PCIe transfers; on TPU the path is
+        # CPU→TPU via infeed DMA and pinning has no effect (just wastes host
+        # RAM). Disable on XLA, keep on for CUDA dev.
+        pin_memory=not HAS_XLA,
         persistent_workers=args.num_workers > 0,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size,
-        sampler=val_sampler,
+        val_ds, batch_size=global_batch,
         shuffle=False, drop_last=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        # pin_memory only helps CPU→CUDA PCIe transfers; on TPU the path is
+        # CPU→TPU via infeed DMA and pinning has no effect (just wastes host
+        # RAM). Disable on XLA, keep on for CUDA dev.
+        pin_memory=not HAS_XLA,
         persistent_workers=args.num_workers > 0,
     )
 
@@ -923,6 +1097,19 @@ def train(args, rank: int = 0):
         best_val_ppl = float("inf")
         start_epoch  = 0
 
+    # ── Pre-compile model.step (sample-generation graph) ───────────────────
+    # The end-of-epoch sampler uses model.step(), a different XLA HLO than
+    # model.forward(). Without this, the first sample at end-of-epoch-1
+    # eats a ~30s cold-compile stall mid-training (visible as a z>15 spike
+    # in throughput). Pre-compiling moves that cost into startup.
+    if args.sample_every_n_epochs > 0:
+        log("Pre-compiling model.step graph (sample-generation path)...")
+        try:
+            elapsed = _precompile_step_graph(model, device, log)
+            log(f"  ↳ pre-compile complete in {elapsed:.1f}s")
+        except Exception as e:
+            log(f"  ↳ pre-compile failed ({e!r}); first sample-gen will compile mid-run")
+
     # ── Training loop ──────────────────────────────────────────────────────
     model.train()
     log_buf = []
@@ -936,8 +1123,10 @@ def train(args, rank: int = 0):
 
     try:
         for epoch in range(start_epoch, args.epochs):
-            if train_sampler is not None:
-                train_sampler.set_epoch(epoch)
+            # Per-epoch shuffle reproducibility — DataLoader's shuffle uses
+            # the global torch RNG; reseed per epoch so resumed runs see
+            # the same per-epoch ordering they would have seen continuously.
+            torch.manual_seed(args.seed + epoch * 1009 + rank)
 
             # Mid-epoch resume: skip already-completed batches in the first
             # resumed epoch. islice consumes the iterator without invoking
@@ -958,6 +1147,13 @@ def train(args, rank: int = 0):
 
                 x = x.long()                    # nn.Embedding wants int64
                 y = y.long()
+
+                # SPMD: shard the global batch along the data dim across
+                # all XLA devices. Sequence dim is replicated. The GSPMD
+                # partitioner takes care of per-device kernel launches.
+                if spmd_mesh is not None:
+                    xs.mark_sharding(x, spmd_mesh, ("data", None))
+                    xs.mark_sharding(y, spmd_mesh, ("data", None))
 
                 with autocast_ctx:
                     logits = model(x)                        # (B, L, V)
@@ -984,7 +1180,18 @@ def train(args, rank: int = 0):
                 )
 
                 if HAS_XLA:
-                    xm.optimizer_step(optimizer)         # all_reduce + step + mark_step
+                    if spmd_active:
+                        # Under SPMD, gradients on replicated params are
+                        # already aggregated by GSPMD during backward —
+                        # `xm.optimizer_step`'s built-in all_reduce_gradients
+                        # would be a redundant collective. Use plain step +
+                        # explicit mark_step to keep the HLO clean.
+                        optimizer.step()
+                        xm.mark_step()
+                    else:
+                        # xmp.spawn-style multi-process (now unused) or single
+                        # XLA device — keep the canonical consolidated call.
+                        xm.optimizer_step(optimizer)
                 else:
                     optimizer.step()
                 scheduler.step()
@@ -1103,14 +1310,16 @@ def train(args, rank: int = 0):
                                 print(f"  ↳ wandb.log failed: {e!r}", flush=True)
 
                 # ── Intermediate validation (sweep early-termination signal) ──
-                # Runs across all ranks because evaluate() does an all-reduce.
-                # Lightweight: limited to args.val_every_n_batches batches.
+                # Single-process under SPMD; evaluate() does an explicit
+                # xm.all_reduce on the per-device losses to compute the
+                # global mean. Lightweight: --val_every_n_batches batches.
                 if (args.val_every_n_steps > 0
                         and global_step % args.val_every_n_steps == 0):
                     eval_out = evaluate(
                         model, val_iter_loader, pad_vocab, device,
                         max_batches=args.val_every_n_batches,
                         autocast_ctx=autocast_ctx,
+                        spmd_mesh=spmd_mesh, num_devices=num_devices,
                     )
                     iv_loss = eval_out["loss"]
                     iv_ppl  = (math.exp(min(iv_loss, 20))
@@ -1162,6 +1371,7 @@ def train(args, rank: int = 0):
                             model, val_iter_loader, pad_vocab, device,
                             max_batches=args.eval_batches,
                             autocast_ctx=autocast_ctx,
+                            spmd_mesh=spmd_mesh, num_devices=num_devices,
                         )
                         fv_loss = eval_out["loss"]
                         fv_ppl  = (math.exp(min(fv_loss, 20))
@@ -1208,7 +1418,8 @@ def train(args, rank: int = 0):
             # ── End-of-epoch validation ────────────────────────────────────
             eval_out = evaluate(model, val_iter_loader, pad_vocab,
                                 device, max_batches=args.eval_batches,
-                                autocast_ctx=autocast_ctx)
+                                autocast_ctx=autocast_ctx,
+                                spmd_mesh=spmd_mesh, num_devices=num_devices)
             val_loss = eval_out["loss"]
             val_top1 = eval_out["top1"]
             val_top5 = eval_out["top5"]
@@ -1274,6 +1485,36 @@ def train(args, rank: int = 0):
                     )
                 except Exception as e:
                     print(f"  ↳ wandb.log (val) failed: {e!r}", flush=True)
+
+            # ── Inference benchmark (decode/prefill throughput, state size) ──
+            # Quantifies Mamba's main serving advantage vs the transformer
+            # baseline: O(1) per-token decode and a fixed-size inference
+            # state that doesn't grow with sequence length.
+            if (is_master
+                    and args.inference_bench_every_n_epochs > 0
+                    and (epoch + 1) % args.inference_bench_every_n_epochs == 0):
+                try:
+                    bench = _benchmark_inference(model, cfg, device)
+                    # Compact log line — full metrics go to wandb.
+                    decode_tps   = bench.get("inference/decode_tps", float("nan"))
+                    decode_lat   = bench.get("inference/decode_latency_ms", float("nan"))
+                    state_kb     = bench.get("inference/state_kb", float("nan"))
+                    prefill_keys = sorted(k for k in bench if "prefill_L" in k and "tps" in k)
+                    prefill_str  = "  ".join(
+                        f"{k.split('_L')[1].split('_')[0]}={bench[k]/1e3:.1f}k"
+                        for k in prefill_keys
+                    )
+                    log(f"  📊 inference: decode {decode_tps:.0f} tok/s "
+                        f"({decode_lat:.2f}ms/tok)  prefill[{prefill_str}]  "
+                        f"state {state_kb:.1f} KB/stream")
+                    if wandb_enabled:
+                        try:
+                            wandb.log(bench, step=global_step)
+                        except Exception as e:
+                            print(f"  ↳ wandb.log (inference) failed: {e!r}",
+                                  flush=True)
+                except Exception as e:
+                    log(f"  ↳ inference benchmark failed: {e!r}")
 
             # ── Sample text generation (master only, end-of-epoch) ─────────
             if (is_master and args.sample_every_n_epochs > 0
@@ -1492,8 +1733,9 @@ def _resume_from_checkpoint(args, model, optimizer, scheduler, *,
     fails loudly rather than silently corrupting training. Returns the run
     state dict or None if no resume was requested.
 
-    SPMD-safe: only master downloads the artifact; all ranks rendezvous
-    before reading the local cache file.
+    SPMD-safe: single Python process, so the master-only download just
+    runs once and the file is then read by the same process. No inter-
+    process rendezvous needed.
     """
     cache_path = None
 
@@ -1526,10 +1768,7 @@ def _resume_from_checkpoint(args, model, optimizer, scheduler, *,
     else:
         return None
 
-    # All ranks meet here; non-master waited while master pulled the artifact.
-    if HAS_XLA and world_size > 1:
-        xm.rendezvous("resume_ready")
-
+    # No cross-process rendezvous needed — single Python process under SPMD.
     if not os.path.exists(cache_path):
         raise FileNotFoundError(
             f"Resume checkpoint {cache_path!r} does not exist on rank "
@@ -1553,13 +1792,26 @@ def _resume_from_checkpoint(args, model, optimizer, scheduler, *,
             f"Architecture mismatch on resume — refuse to load. {details}"
         )
 
-    # Sequence length must match because steps_per_epoch and the scheduler
-    # curve depend on it. Same for batch_size at the global level.
+    # Sequence length AND per-device batch size must match. Both feed into
+    # `steps_per_epoch`, which `start_epoch = global_step // steps_per_epoch`
+    # uses to derive the resume offset. A mismatch silently mis-aligns
+    # which batches get re-trained vs. skipped — a hard-to-debug
+    # data-revisitation bug. Hard-fail with a fix-it message.
     saved_args = payload.get("args", {})
-    seq_len_saved   = saved_args.get("seq_len", args.seq_len)
+    seq_len_saved = saved_args.get("seq_len", args.seq_len)
     if seq_len_saved != args.seq_len:
         raise RuntimeError(
-            f"seq_len mismatch on resume: saved={seq_len_saved} current={args.seq_len}"
+            f"seq_len mismatch on resume: saved={seq_len_saved} current={args.seq_len}. "
+            f"steps_per_epoch and the LR schedule depend on seq_len."
+        )
+    batch_saved = saved_args.get("batch_size", args.batch_size)
+    if batch_saved != args.batch_size:
+        raise RuntimeError(
+            f"batch_size mismatch on resume: saved={batch_saved} current={args.batch_size}. "
+            f"steps_per_epoch = len(train_ds) // (batch_size × num_devices); "
+            f"changing it mis-aligns the resume offset and re-trains already-completed "
+            f"batches (or skips fresh ones). Pass --batch_size {batch_saved} or accept "
+            f"a fresh run."
         )
 
     # ── Restore model weights ──────────────────────────────────────────────
@@ -1603,11 +1855,18 @@ def _resume_from_checkpoint(args, model, optimizer, scheduler, *,
 
 @torch.no_grad()
 def evaluate(model, val_loader, pad_vocab, device,
-             max_batches: int = 50, autocast_ctx=None) -> dict:
+             max_batches: int = 50, autocast_ctx=None,
+             spmd_mesh=None, num_devices: int = 1) -> dict:
     """Mean cross-entropy + top-1 / top-5 accuracy over up to `max_batches`.
 
-    All metrics computed on-device, all_reduced once across world if multi-device,
-    then a SINGLE .cpu() transfer for all three values.
+    Under SPMD: `mark_sharding(x, mesh, ('data', None))` shards the batch
+    across `num_devices`. Each device's `cross_entropy(reduction='mean')`
+    is the mean of its LOCAL shard, NOT a global mean — GSPMD does not
+    auto-insert reductions for scalar outputs of sharded inputs. We must
+    therefore call `xm.all_reduce` explicitly to compute the global mean,
+    same as the prior xmp.spawn implementation. (This is the fix for the
+    silent-bug surfaced by the SPMD code review.)
+
     Returns: {"loss": float, "top1": float, "top5": float}.
     """
     model.eval()
@@ -1620,6 +1879,9 @@ def evaluate(model, val_loader, pad_vocab, device,
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
         x = x.long(); y = y.long()
+        if spmd_mesh is not None:
+            xs.mark_sharding(x, spmd_mesh, ("data", None))
+            xs.mark_sharding(y, spmd_mesh, ("data", None))
         with autocast_ctx:
             logits = model(x)
             flat_logits = logits.view(-1, pad_vocab)
@@ -1634,10 +1896,16 @@ def evaluate(model, val_loader, pad_vocab, device,
     avg_loss = torch.stack(losses).mean()
     avg_top1 = torch.stack(top1s).mean()
     avg_top5 = torch.stack(top5s).mean()
-    if HAS_XLA and _xla_world_size() > 1:
-        avg_loss = xm.all_reduce(xm.REDUCE_SUM, avg_loss) / _xla_world_size()
-        avg_top1 = xm.all_reduce(xm.REDUCE_SUM, avg_top1) / _xla_world_size()
-        avg_top5 = xm.all_reduce(xm.REDUCE_SUM, avg_top5) / _xla_world_size()
+    # CRITICAL: under SPMD, scalar reductions on sharded inputs do NOT auto-
+    # aggregate — each device produces its per-shard mean. Without this
+    # all_reduce we'd report whatever value happened to land on the host
+    # (typically device 0's), which is the global mean only in expectation
+    # and has 1/sqrt(N) the variance reduction we expect. Sweeps and best-
+    # checkpoint selection downstream depend on this being correct.
+    if HAS_XLA and spmd_mesh is not None and num_devices > 1:
+        avg_loss = xm.all_reduce(xm.REDUCE_SUM, avg_loss) / num_devices
+        avg_top1 = xm.all_reduce(xm.REDUCE_SUM, avg_top1) / num_devices
+        avg_top5 = xm.all_reduce(xm.REDUCE_SUM, avg_top5) / num_devices
     # SINGLE .cpu() across all three scalars (xla_tpu_reference §2.2).
     triplet = torch.stack([avg_loss, avg_top1, avg_top5]).cpu().tolist()
     model.train()
@@ -1654,13 +1922,8 @@ class _nullcontext:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-device launcher
+# YAML config loader
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _mp_fn(rank: int, args):
-    """xmp.spawn entry point — one process per TPU core."""
-    train(args, rank=rank)
-
 
 def _load_yaml_config(path: str) -> dict:
     """Load a YAML config file. Normalises any dash-keys to underscore-keys
@@ -1731,7 +1994,7 @@ def main():
 
     # ── Optimisation ───────────────────────────────────────────────────────
     parser.add_argument("--epochs",       type=int,   default=1)
-    parser.add_argument("--batch_size",   type=int,   default=64)
+    parser.add_argument("--batch_size",   type=int,   default=128)   # per device
     parser.add_argument("--lr",           type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--grad_clip",    type=float, default=2.0)
@@ -1783,6 +2046,11 @@ def main():
                              "TPU v4 TensorCore bf16 ≈ 1.375e14, "
                              "v6e chip bf16 ≈ 4.59e14. 0 disables MFU.")
 
+    # ── Inference benchmarking at end of epoch (decode/prefill perf) ───────
+    parser.add_argument("--inference_bench_every_n_epochs", type=int, default=1,
+                        help="Run inference benchmark every N epochs (decode "
+                             "tok/s, prefill tok/s, state size). 0 disables.")
+
     # ── Sample generation at end of epoch (qualitative monitoring) ─────────
     parser.add_argument("--sample_every_n_epochs", type=int, default=1,
                         help="Generate text samples every N epochs. 0 disables.")
@@ -1799,7 +2067,9 @@ def main():
     parser.add_argument("--save_path", default="mamba_simplestories_5m.pt")
     parser.add_argument("--multi_device", action=argparse.BooleanOptionalAction,
                         default=False,
-                        help="Launch one process per TPU core (xmp.spawn)")
+                        help="Enable SPMD across all available XLA devices "
+                             "(single Python process; GSPMD shards the global "
+                             "batch). Off = single device.")
 
     # ── Resume training from a previous run ─────────────────────────────────
     # Two sources, in priority order: --resume_artifact (master pulls from
@@ -1868,8 +2138,17 @@ def main():
     if args.multi_device:
         if not HAS_XLA:
             raise RuntimeError("--multi_device requires torch_xla")
-        import torch_xla.distributed.xla_multiprocessing as xmp
-        xmp.spawn(_mp_fn, args=(args,))
+        if not HAS_SPMD:
+            raise RuntimeError(
+                "--multi_device now uses SPMD (torch_xla.distributed.spmd). "
+                "Your torch_xla install lacks SPMD support — upgrade to "
+                "torch_xla >= 2.0 (the project pins ~2.9 in requirements_tpu.txt)."
+            )
+        # SPMD MUST be enabled BEFORE any XLA device is acquired. The
+        # `_xla_device()` call inside train() is the first acquisition;
+        # toggling here is safe because no XLA device has been touched yet.
+        xr.use_spmd()
+        train(args)
     else:
         train(args)
 

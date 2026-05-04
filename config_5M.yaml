@@ -25,7 +25,7 @@ kernel_size: 4
 seq_len:     512       # = transformer n_ctx
 
 # ─── Optimisation ──────────────────────────────────────────────────────────
-batch_size:    64
+batch_size:    128     # per-device; SPMD shards globally as B × num_devices
 lr:            3.0e-4  # Mamba-conventional; larger than SimpleStories
                        #   transformer's 1e-4 — Mamba tolerates higher lr
 weight_decay:  0.1

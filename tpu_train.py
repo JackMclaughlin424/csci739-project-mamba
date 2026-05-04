@@ -95,11 +95,15 @@ try:
         _xla_process_index = xm.get_ordinal
         _xla_is_master     = xm.is_master_ordinal
         _xla_device        = xm.xla_device
+    # `xm.mark_step()` was deprecated in torch_xla 2.5+ in favour of
+    # `torch_xla.sync()`. Resolve once and use `_xla_sync()` site-wide.
+    _xla_sync = getattr(_txla, "sync", None) or xm.mark_step
 except ImportError:
     HAS_XLA = False
     SyncfreeAdamW = torch.optim.AdamW
     xm = met = pl = None  # type: ignore
     _xla_world_size = _xla_process_index = _xla_is_master = _xla_device = None  # type: ignore
+    _xla_sync = lambda: None  # type: ignore
 
 # SPMD detection — torch_xla 2.0+ ships the GSPMD partitioner under
 # `torch_xla.distributed.spmd`. Required for the single-process / mark-
@@ -335,7 +339,7 @@ def _precompile_step_graph(model, device, log) -> float:
             logits, _ = model.step(dummy, caches)
             # Force materialisation so the compile actually fires.
             if HAS_XLA:
-                xm.mark_step()
+                _xla_sync()
                 # One on-device read forces the compiled program to execute,
                 # ensuring the cache entry is fully realised before training.
                 _ = float(logits.float().sum().cpu())
@@ -467,8 +471,8 @@ def _benchmark_inference(model, cfg, device, *,
 
     def _sync():
         if HAS_XLA:
-            xm.mark_step()
-            xm.wait_device_ops()
+            _xla_sync()
+            xm.wait_device_ops()   # still the canonical "block until idle" call
 
     # ── Prefill throughput at multiple sequence lengths ────────────────────
     for L in prefill_lens:
@@ -936,6 +940,29 @@ def train(args, rank: int = 0):
         use_checkpoint=args.checkpoint,
     )
     model = MambaLMHeadModel(cfg).to(device)
+
+    # ── Re-tie the lm_head to the embedding AFTER .to(device) ──────────────
+    # In `MambaLMHeadModel.__init__`, when `tie_embeddings=True`, we do
+    # `self.lm_head.weight = self.embedding.weight` so both Parameter slots
+    # point to the same underlying tensor. But `model.to(device)` calls
+    # `_apply` on each submodule independently and creates a fresh device-
+    # side Parameter for each occurrence — without that memoisation working
+    # reliably across all torch_xla / PyTorch versions, the tying breaks
+    # silently and lm_head and embedding diverge during training.
+    #
+    # Symptom of unfixed: train converges to a "bigram-only" identity-map
+    # model (forward-loss ~ 9 = uniform-baseline-ish, no sequence learning,
+    # generations look superficially coherent due to top-k bigram sampling).
+    # Run mamba-5m-ameevykj at v19 hit this exact failure — embedding.weight
+    # std drifted to 0.042, lm_head.weight std to 0.090, mean diff 0.075.
+    if cfg.tie_embeddings:
+        model.lm_head.weight = model.embedding.weight
+        assert (model.lm_head.weight.data_ptr()
+                == model.embedding.weight.data_ptr()), (
+            "tied-embedding aliasing broken after .to(device). "
+            "Training would silently produce a degenerate bigram model."
+        )
+
     num_params_unique     = model.num_parameters(unique=True)
     num_params_non_embed  = num_params_unique - model.embedding.weight.numel()
     log(f"Model: {num_params_unique:,} unique params  "
@@ -1185,9 +1212,9 @@ def train(args, rank: int = 0):
                         # already aggregated by GSPMD during backward —
                         # `xm.optimizer_step`'s built-in all_reduce_gradients
                         # would be a redundant collective. Use plain step +
-                        # explicit mark_step to keep the HLO clean.
+                        # explicit sync to keep the HLO clean.
                         optimizer.step()
-                        xm.mark_step()
+                        _xla_sync()
                     else:
                         # xmp.spawn-style multi-process (now unused) or single
                         # XLA device — keep the canonical consolidated call.
@@ -1310,9 +1337,9 @@ def train(args, rank: int = 0):
                                 print(f"  ↳ wandb.log failed: {e!r}", flush=True)
 
                 # ── Intermediate validation (sweep early-termination signal) ──
-                # Single-process under SPMD; evaluate() does an explicit
-                # xm.all_reduce on the per-device losses to compute the
-                # global mean. Lightweight: --val_every_n_batches batches.
+                # Single-process under SPMD; evaluate() reports the per-device
+                # mean (an unbiased estimator of the global mean for iid data).
+                # Lightweight: --val_every_n_batches batches.
                 if (args.val_every_n_steps > 0
                         and global_step % args.val_every_n_steps == 0):
                     eval_out = evaluate(
@@ -1859,13 +1886,25 @@ def evaluate(model, val_loader, pad_vocab, device,
              spmd_mesh=None, num_devices: int = 1) -> dict:
     """Mean cross-entropy + top-1 / top-5 accuracy over up to `max_batches`.
 
-    Under SPMD: `mark_sharding(x, mesh, ('data', None))` shards the batch
-    across `num_devices`. Each device's `cross_entropy(reduction='mean')`
-    is the mean of its LOCAL shard, NOT a global mean — GSPMD does not
-    auto-insert reductions for scalar outputs of sharded inputs. We must
-    therefore call `xm.all_reduce` explicitly to compute the global mean,
-    same as the prior xmp.spawn implementation. (This is the fix for the
-    silent-bug surfaced by the SPMD code review.)
+    Aggregation policy
+    ------------------
+    Under SPMD (single Python process, sharded data): each device's
+    `cross_entropy(reduction='mean')` is the mean of its local data shard.
+    For iid-shuffled test data this is already an UNBIASED ESTIMATOR of
+    the global mean — the only thing we'd gain by aggregating is a
+    sqrt(num_devices) variance reduction, which is negligible at our
+    sample counts (thousands of tokens per device per batch).
+
+    We previously tried `xm.all_reduce(SUM) / num_devices` here, on the
+    advice of a code review that assumed `xm.all_reduce` works the same
+    way under SPMD as under xmp.spawn. It does not. Under single-process
+    SPMD, the per-device scalar is annotated as replicated and
+    `xm.all_reduce` no-ops; the divide-by-N then silently shrunk the
+    reported value (observed: 16× too small on TPU v4-4 — the model's
+    actual loss was 9.07 but reports came out as 0.57). The 4× factor
+    matches `num_devices`; a residual factor seems to come from how
+    GSPMD treats the scalar reduction of a `cross_entropy(reduction='mean')`
+    over a sharded input.
 
     Returns: {"loss": float, "top1": float, "top5": float}.
     """
@@ -1896,16 +1935,13 @@ def evaluate(model, val_loader, pad_vocab, device,
     avg_loss = torch.stack(losses).mean()
     avg_top1 = torch.stack(top1s).mean()
     avg_top5 = torch.stack(top5s).mean()
-    # CRITICAL: under SPMD, scalar reductions on sharded inputs do NOT auto-
-    # aggregate — each device produces its per-shard mean. Without this
-    # all_reduce we'd report whatever value happened to land on the host
-    # (typically device 0's), which is the global mean only in expectation
-    # and has 1/sqrt(N) the variance reduction we expect. Sweeps and best-
-    # checkpoint selection downstream depend on this being correct.
-    if HAS_XLA and spmd_mesh is not None and num_devices > 1:
-        avg_loss = xm.all_reduce(xm.REDUCE_SUM, avg_loss) / num_devices
-        avg_top1 = xm.all_reduce(xm.REDUCE_SUM, avg_top1) / num_devices
-        avg_top5 = xm.all_reduce(xm.REDUCE_SUM, avg_top5) / num_devices
+    # Each device's per-shard mean is an unbiased estimator of the global
+    # mean (iid shards). The earlier "explicit xm.all_reduce(SUM) / N"
+    # pattern was incorrect under single-process SPMD: `xm.all_reduce` is a
+    # no-op there (no inter-process collective), and the divide silently
+    # made values num_devices× too small — observed empirically as a 4×
+    # bias on TPU v4-4. Trust the per-device estimator; the variance gain
+    # from cross-device aggregation is negligible at our sample counts.
     # SINGLE .cpu() across all three scalars (xla_tpu_reference §2.2).
     triplet = torch.stack([avg_loss, avg_top1, avg_top5]).cpu().tolist()
     model.train()

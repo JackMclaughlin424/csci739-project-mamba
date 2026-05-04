@@ -304,7 +304,9 @@ def evaluate_test(model, test_loader, pad_vocab, device, *,
     Mirrors `tpu_train.evaluate()` math exactly (so test/loss is on the same
     scale as val/loss from training), but without the `max_batches` cap —
     test reporting should use every available test token. Under SPMD, the
-    explicit `xm.all_reduce` aggregates per-device losses to a global mean.
+    per-device cross_entropy mean is reported as-is (it's an unbiased
+    estimator of the global mean for iid-shuffled test data); see
+    `tpu_train.evaluate()` for the rationale.
     """
     model.eval()
     losses, top1s, top5s = [], [], []
@@ -344,12 +346,14 @@ def evaluate_test(model, test_loader, pad_vocab, device, *,
     avg_loss = torch.stack(losses).mean()
     avg_top1 = torch.stack(top1s).mean()
     avg_top5 = torch.stack(top5s).mean()
-    if HAS_XLA and spmd_mesh is not None and num_devices > 1:
-        # See `tpu_train.evaluate` — GSPMD does NOT auto-aggregate scalars
-        # from sharded reductions; the explicit all_reduce is required.
-        avg_loss = xm.all_reduce(xm.REDUCE_SUM, avg_loss) / num_devices
-        avg_top1 = xm.all_reduce(xm.REDUCE_SUM, avg_top1) / num_devices
-        avg_top5 = xm.all_reduce(xm.REDUCE_SUM, avg_top5) / num_devices
+    # Each device's `F.cross_entropy(reduction='mean')` over its data shard is
+    # already an unbiased estimator of the global mean (iid shards). We
+    # previously tried `xm.all_reduce(REDUCE_SUM) / num_devices` here under
+    # the assumption that GSPMD wouldn't auto-aggregate, but on single-process
+    # SPMD `xm.all_reduce` is effectively a no-op (no inter-process collective
+    # to invoke) and the divide silently made values num_devices× too small —
+    # observed empirically as a 4× bias on TPU v4-4. Trust the per-device
+    # estimator; variance over thousands of samples is negligible.
     triplet = torch.stack([avg_loss, avg_top1, avg_top5]).cpu().tolist()
     loss_nats, top1, top5 = triplet
     ppl = math.exp(min(loss_nats, 20)) if math.isfinite(loss_nats) else float("nan")

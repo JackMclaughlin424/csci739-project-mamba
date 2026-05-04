@@ -23,7 +23,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(__file__))
-from mamba.mamba_llm_tpu import MambaLMConfig, MambaLMHeadModel
+
+# CUDA setup flags (no-ops on CPU). TF32 doubles fp32 matmul throughput
+# on Ampere+; cudnn.benchmark picks the fastest depthwise-conv algo.
+torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True
+
+# Prefer the Triton-backed CUDA path when CUDA is available; both
+# modules expose identical state_dict keys so the same checkpoint loads
+# into either with strict=True.
+if torch.cuda.is_available():
+    from mamba.mamba_llm_cuda import MambaLMConfig, MambaLMHeadModel
+else:
+    from mamba.mamba_llm_tpu import MambaLMConfig, MambaLMHeadModel
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
@@ -66,10 +78,16 @@ def build_test_data(dataset, split, tokenizer, seq_len, max_stories, lowercase):
 
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate(model, data, batch_size, device):
+    # Defensive eval mode + on-device metric accumulation. Single host
+    # transfer at the end instead of three .item() syncs per batch.
+    model.eval()
     loader = DataLoader(data, batch_size=batch_size, shuffle=False)
-    losses, top1s, top5s = [], [], []
+    sum_loss = torch.zeros(1, device=device, dtype=torch.float64)
+    sum_top1 = torch.zeros(1, device=device, dtype=torch.float64)
+    sum_top5 = torch.zeros(1, device=device, dtype=torch.float64)
+    n_batches = 0
 
     for batch in tqdm(loader, desc="  eval", leave=False):
         x, y = batch[:, :-1].to(device), batch[:, 1:].to(device)
@@ -80,16 +98,18 @@ def evaluate(model, data, batch_size, device):
         flat_l = logits.reshape(-1, logits.size(-1))
         flat_y = y.reshape(-1)
 
-        losses.append(F.cross_entropy(flat_l, flat_y).item())
-        top1s.append((flat_l.argmax(-1) == flat_y).float().mean().item())
-        top5s.append((flat_l.topk(5, -1).indices == flat_y.unsqueeze(-1)).any(-1).float().mean().item())
+        sum_loss += F.cross_entropy(flat_l, flat_y).double()
+        sum_top1 += (flat_l.argmax(-1) == flat_y).double().mean()
+        sum_top5 += (flat_l.topk(5, -1).indices == flat_y.unsqueeze(-1)).any(-1).double().mean()
+        n_batches += 1
 
-    avg_loss = sum(losses) / len(losses)
+    avg = (torch.stack([sum_loss, sum_top1, sum_top5]) / max(n_batches, 1)).cpu().tolist()
+    avg_loss, avg_top1, avg_top5 = avg[0][0], avg[1][0], avg[2][0]
     return {
         "loss":        avg_loss,
         "perplexity":  math.exp(min(avg_loss, 20)),
-        "top1":        sum(top1s) / len(top1s),
-        "top5":        sum(top5s) / len(top5s),
+        "top1":        avg_top1,
+        "top5":        avg_top5,
     }
 
 

@@ -3,7 +3,9 @@ from typing import Dict, List, Optional
 import torch
 from transformers import PreTrainedTokenizer
 
-from fewshot_data import FewShotDataset, FewShotFormat
+from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
+from experiments.icl_task_vectors.core.data.datasets.few_shot_format import FewShotFormat
+
 
 
 def tokenize_datasets(
@@ -27,6 +29,12 @@ def batch_generate(
     generate_kwargs: Optional[Dict] = None,
     batch_size: int = 8,
 ) -> torch.Tensor:
+    try:
+        import torch_xla.core.xla_model as xm
+        HAS_XLA = True
+    except ImportError:
+        HAS_XLA = False
+
     generate_kwargs = dict(generate_kwargs or {})
     max_new_tokens = generate_kwargs.pop("max_new_tokens", 1)
 
@@ -40,31 +48,16 @@ def batch_generate(
             batch_ids = input_ids[i : i + batch_size].to(device)
             B, L = batch_ids.shape
 
-            # Single parallel forward over the full prompt; take the last position's logits.
             logits = model(batch_ids)           # (B, L, V)
             next_token = logits[:, -1, :].argmax(dim=-1)   # (B,)
+            all_new_ids.append(next_token.unsqueeze(1))
 
-            if max_new_tokens == 1:
-                all_new_ids.append(next_token.unsqueeze(1).cpu())
-                continue
+            if HAS_XLA:
+                xm.mark_step()
 
-            # For multiple new tokens, populate the recurrent cache then step.
-            caches = model.allocate_inference_cache(
-                batch_size=B, dtype=torch.float32, device=device,
-            )
-            for t in range(L):
-                _, caches = model.step(batch_ids[:, t], caches)
+    # Single transfer off-device after all batches are done.
+    return torch.cat(all_new_ids, dim=0).cpu()
 
-            generated = [next_token.unsqueeze(1)]
-            cur_token = next_token
-            for _ in range(max_new_tokens - 1):
-                logits, caches = model.step(cur_token, caches)
-                cur_token = logits.argmax(dim=-1)
-                generated.append(cur_token.unsqueeze(1))
-
-            all_new_ids.append(torch.cat(generated, dim=1).cpu())
-
-    return torch.cat(all_new_ids, dim=0)
 
 
 def decode_predictions(

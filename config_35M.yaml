@@ -52,8 +52,8 @@ peak_flops_per_device: 1.375e14   # v4 TensorCore peak (bf16)
 
 # ─── Validation cadence ────────────────────────────────────────────────────
 # Less frequent than the 5M run because val passes are also ~7× slower.
-log_interval:         20
-val_every_n_steps:    2000
+log_interval:         500
+val_every_n_steps:    1000
 val_every_n_batches:  20
 eval_batches:         50
 

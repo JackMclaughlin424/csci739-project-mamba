@@ -15,7 +15,8 @@ over width.
     | d_vocab = 4096 | vocabulary size      | vocab_size = 4096   |
     | n_layers = 6   | (transformer-spec)   | n_layer = 9 (Mamba) |
     | n_params ≈ 5M  | unique parameters    | d_model = 512 (E=2) |
-    |                |                      |   → 5.06M unique    |
+    |                |                      | dt_rank = 32 (=d/16)|
+    |                |                      |   → 5.14M unique    |
 
 Pass --n_layer 6 --d_model 768 for the depth-matched (E=3) variant if you
 want to isolate "depth or architecture wins?" in the comparison study.
@@ -1661,10 +1662,38 @@ def _mp_fn(rank: int, args):
     train(args, rank=rank)
 
 
+def _load_yaml_config(path: str) -> dict:
+    """Load a YAML config file. Normalises any dash-keys to underscore-keys
+    so YAML can use either `grad-clip:` or `grad_clip:` interchangeably."""
+    try:
+        import yaml
+    except ImportError:
+        raise SystemExit(
+            "--config requires PyYAML. Install with: pip install pyyaml"
+        )
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"--config {path}: expected a YAML mapping at the top level")
+    return {k.replace("-", "_"): v for k, v in cfg.items()}
+
+
 def main():
+    # ── Two-pass argparse for YAML support ─────────────────────────────────
+    # First pass: discover --config (and nothing else) without erroring on
+    # the rest. Second pass: build the full parser with YAML values applied
+    # as defaults via parser.set_defaults(), then re-parse so explicit CLI
+    # flags still win over YAML values.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
     parser = argparse.ArgumentParser(
         description="Mamba LM training — SimpleStories-5M-equivalent on TPU",
     )
+    parser.add_argument("--config", default=None,
+                        help="Path to a YAML config file. Values become "
+                             "defaults; explicit CLI flags override them.")
 
     # ── Data (HF SimpleStories defaults) ───────────────────────────────────
     parser.add_argument("--dataset_name",    default="lennart-finke/SimpleStories",
@@ -1696,7 +1725,7 @@ def main():
     parser.add_argument("--d_input",     type=int, default=256)   # = baseline d_model
     parser.add_argument("--d_model",     type=int, default=512)   # E=2 (paper standard)
     parser.add_argument("--d_state",     type=int, default=16)
-    parser.add_argument("--dt_rank",     type=int, default=16)
+    parser.add_argument("--dt_rank",     type=int, default=32)   # = d_model/16 (Mamba paper)
     parser.add_argument("--kernel_size", type=int, default=4)
     parser.add_argument("--seq_len",     type=int, default=512)   # = baseline n_ctx
 
@@ -1705,7 +1734,7 @@ def main():
     parser.add_argument("--batch_size",   type=int,   default=64)
     parser.add_argument("--lr",           type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=0.1)
-    parser.add_argument("--grad_clip",    type=float, default=1.0)
+    parser.add_argument("--grad_clip",    type=float, default=2.0)
     parser.add_argument("--log_interval", type=int,   default=20)
     parser.add_argument("--eval_batches", type=int,   default=50)
     parser.add_argument("--seed",         type=int,   default=0)
@@ -1736,9 +1765,13 @@ def main():
                              "(end-of-epoch val uses --eval_batches).")
 
     # ── Memory & precision ─────────────────────────────────────────────────
-    parser.add_argument("--checkpoint", action="store_true",
+    # BooleanOptionalAction so YAML can set `bf16: true|false` and CLI can
+    # use `--bf16` or `--no-bf16` interchangeably.
+    parser.add_argument("--checkpoint", action=argparse.BooleanOptionalAction,
+                        default=False,
                         help="Gradient checkpointing on each ResidualBlock")
-    parser.add_argument("--bf16", action="store_true",
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction,
+                        default=False,
                         help="Forward in bfloat16 autocast (cross_entropy stays fp32)")
 
     # ── Hardware peak FLOPs (for MFU computation) ──────────────────────────
@@ -1764,7 +1797,8 @@ def main():
 
     # ── I/O & parallelism ──────────────────────────────────────────────────
     parser.add_argument("--save_path", default="mamba_simplestories_5m.pt")
-    parser.add_argument("--multi_device", action="store_true",
+    parser.add_argument("--multi_device", action=argparse.BooleanOptionalAction,
+                        default=False,
                         help="Launch one process per TPU core (xmp.spawn)")
 
     # ── Resume training from a previous run ─────────────────────────────────
@@ -1811,6 +1845,23 @@ def main():
     parser.add_argument("--no_tokens_artifact", action="store_true",
                         help="Skip both downloading and uploading the tokenized "
                              "cache as a wandb artifact (use local file only).")
+
+    # Apply YAML defaults BEFORE the final parse so explicit CLI flags still
+    # take priority over YAML values. Unknown keys are flagged loudly to
+    # catch typos (otherwise a misspelled `lerning_rate:` would silently
+    # do nothing).
+    if pre_args.config:
+        yaml_cfg = _load_yaml_config(pre_args.config)
+        valid_dests = {a.dest for a in parser._actions}
+        unknown = sorted(set(yaml_cfg) - valid_dests)
+        if unknown:
+            raise SystemExit(
+                f"--config {pre_args.config}: unknown keys {unknown}. "
+                f"Valid keys: {sorted(valid_dests)}"
+            )
+        parser.set_defaults(**yaml_cfg)
+        print(f"Loaded config {pre_args.config}: "
+              f"{len(yaml_cfg)} key(s) → {sorted(yaml_cfg)}", flush=True)
 
     args = parser.parse_args()
 

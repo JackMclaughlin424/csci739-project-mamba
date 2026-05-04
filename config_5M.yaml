@@ -1,0 +1,60 @@
+# config_5M.yaml — 5M Mamba on SimpleStories (TPU v4-4)
+#
+# Param-matched (~5.14M unique) to the SimpleStories-5M transformer baseline
+# (5.37M params, n_layer=6, n_embd=256, vocab=4096, n_ctx=512). Mamba uses
+# the canonical E=2 expansion and dt_rank = d_model/16 from Gu & Dao 2023.
+#
+# Token budget mirrors the upstream `35M_config.yaml`:
+#     60 000 iter × 64 batch × 512 ctx ≈ 1.97 B tokens
+# That's ≈ 3.3 epochs of the SimpleStories train split (~600 M tokens).
+# `epochs: 4` gives the inner loop room; `max_tokens` early-stops at 2 B.
+#
+# Usage:
+#     PJRT_DEVICE=TPU python tpu_train.py --config config_5M.yaml
+
+# ─── Architecture ──────────────────────────────────────────────────────────
+# 9 layers × 256 residual / 512 inner ≈ 5.14 M unique params.
+# Matches the transformer's n_embd=256, more depth to absorb the budget
+# (Mamba's documented depth-over-width preference).
+n_layer:     9
+d_input:     256       # residual stream dim — matches transformer n_embd
+d_model:     512       # inner dim, E=2 expansion (canonical Mamba)
+d_state:     16        # SSM state dim (paper convention)
+dt_rank:     32        # = d_model / 16 (paper rule)
+kernel_size: 4
+seq_len:     512       # = transformer n_ctx
+
+# ─── Optimisation ──────────────────────────────────────────────────────────
+batch_size:    64
+lr:            3.0e-4  # Mamba-conventional; larger than SimpleStories
+                       #   transformer's 1e-4 — Mamba tolerates higher lr
+weight_decay:  0.1
+grad_clip:     2.0     # default 1.0 was clipping > 96% of windows
+warmup_steps:  600     # matches upstream SimpleStories warmup_iters
+max_tokens:    2000000000   # SimpleStories baseline budget (~2 B)
+epochs:        4       # ceiling — max_tokens early-stops first
+
+# ─── Memory & precision (TPU) ──────────────────────────────────────────────
+bf16:        true
+checkpoint:  true      # XLA grad checkpointing per ResidualBlock
+
+# ─── Hardware (for MFU) ────────────────────────────────────────────────────
+# v4 TensorCore peak (bf16 with fp32 accumulation) = 137.5 TFLOPs/s
+peak_flops_per_device: 1.375e14
+
+# ─── Validation cadence ────────────────────────────────────────────────────
+log_interval:         20
+val_every_n_steps:    1000
+val_every_n_batches:  20
+eval_batches:         50
+
+# ─── I/O ───────────────────────────────────────────────────────────────────
+save_path:        mamba_simplestories_5m.pt
+tokenized_cache:  simplestories_tokens_v3.pt
+
+# ─── wandb ─────────────────────────────────────────────────────────────────
+wandb_project:  mamba-simplestories
+wandb_tags:     [production, 5M, v4-4]
+
+# ─── Multi-device launcher ─────────────────────────────────────────────────
+multi_device:  true

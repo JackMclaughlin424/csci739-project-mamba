@@ -1,0 +1,69 @@
+# config_35M.yaml — 35M Mamba on SimpleStories (TPU v4-4)
+#
+# Param-matched (~35.55 M unique) to the SimpleStories-35M transformer
+# baseline (35.13 M params: n_layer=12, n_embd=512, GQA n_kv=2, SwiGLU).
+# Mamba uses canonical E=2 + dt_rank = d_model/16, which lands at 19 layers
+# instead of 12 — Mamba's documented depth preference at fixed param count.
+#
+# Token budget mirrors the upstream `35M_config.yaml`:
+#     60 000 iter × 64 batch × 512 ctx ≈ 1.97 B tokens
+# (≈ 3.3 epochs of SimpleStories train ~600 M tokens; same as 5M run).
+#
+# Compute heads-up: 35M Mamba is ~7× more FLOPs/token than 5M
+# (~218 M vs ~31 M training FLOPs/token). At a comparable MFU, expect
+# 14–20 hours wall clock on v4-4 for the full 2 B-token budget. MFU
+# typically rises with model size — the larger MXU utilisation should
+# partly absorb the FLOP increase.
+#
+# Usage:
+#     PJRT_DEVICE=TPU python tpu_train.py --config config_35M.yaml
+
+# ─── Architecture ──────────────────────────────────────────────────────────
+# 19 layers × 512 residual / 1024 inner ≈ 35.55 M unique params (101.6% of
+# 35M target, within 1.2% of the transformer baseline's 35.13 M).
+n_layer:     19
+d_input:     512       # residual stream dim — matches transformer n_embd
+d_model:    1024       # inner dim, E=2 expansion
+d_state:     16        # SSM state dim (paper convention; same as 5M)
+dt_rank:     64        # = d_model / 16 (paper rule)
+kernel_size: 4
+seq_len:     512       # = transformer n_ctx
+
+# ─── Optimisation ──────────────────────────────────────────────────────────
+# lr scaled down ~1.5× from the 5M Mamba's 3e-4 (loose µTransfer-style:
+# lr ∝ 1/sqrt(d_model_ratio) = 1/sqrt(2) ≈ 0.71). Sweep separately if you
+# want to find the actual optimum.
+batch_size:    64        # if HBM tight, drop to 32 — 35M model is 7× larger
+lr:            2.0e-4    # = 5M lr × 1/sqrt(2) (µP-style scale-down)
+weight_decay:  0.1
+grad_clip:     2.0
+warmup_steps:  600       # matches upstream SimpleStories warmup_iters
+max_tokens:    2000000000  # SimpleStories baseline budget (~2 B)
+epochs:        4         # ceiling — max_tokens early-stops first
+
+# ─── Memory & precision (TPU) ──────────────────────────────────────────────
+# checkpoint is essentially required at this size — without it the 19
+# layers' activations OOM the v4 32 GB HBM at batch_size 64.
+bf16:        true
+checkpoint:  true
+
+# ─── Hardware (for MFU) ────────────────────────────────────────────────────
+peak_flops_per_device: 1.375e14   # v4 TensorCore peak (bf16)
+
+# ─── Validation cadence ────────────────────────────────────────────────────
+# Less frequent than the 5M run because val passes are also ~7× slower.
+log_interval:         20
+val_every_n_steps:    2000
+val_every_n_batches:  20
+eval_batches:         50
+
+# ─── I/O ───────────────────────────────────────────────────────────────────
+save_path:        mamba_simplestories_35m.pt
+tokenized_cache:  simplestories_tokens_v3.pt   # tokenisation is model-size-agnostic
+
+# ─── wandb ─────────────────────────────────────────────────────────────────
+wandb_project:  mamba-simplestories
+wandb_tags:     [production, 35M, v4-4]
+
+# ─── Multi-device launcher ─────────────────────────────────────────────────
+multi_device:  true

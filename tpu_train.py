@@ -311,6 +311,46 @@ def _topk_accuracy(logits: torch.Tensor, targets: torch.Tensor, k: int) -> torch
     return (topk == targets.unsqueeze(-1)).any(-1).float().mean()
 
 
+def _spmd_counter_probe(label: str, baseline: dict | None = None) -> dict:
+    """Snapshot XLA counters for unexpected cross-device collectives.
+
+    Background: under SPMD with batch sharding on `("data", None)`, the only
+    collectives we expect are gradient-sync AllReduces (one per parameter
+    bucket per optimizer step). Anything else — AllToAll, Resharding,
+    CollectivePermute — means GSPMD is doing extra cross-device work
+    triggered by some op that lost its sharding annotation along the way.
+    A single mis-sharded op inside the scan would dwarf every per-step
+    optimisation we might apply.
+
+    Usage: take a baseline snapshot before training, take another after
+    N steps, compare deltas. Only prints suspicious counters that changed.
+    """
+    if not HAS_XLA:
+        return {}
+    suspicious = ('AllReduce', 'AllToAll', 'Reshard', 'CollectivePermute')
+    snap = {}
+    for n in met.counter_names():
+        if any(s in n for s in suspicious):
+            v = met.counter_value(n)
+            snap[n] = int(v) if v is not None else 0
+    if baseline is None:
+        if snap:
+            print(f"[SPMD probe @ {label}] baseline counters: {snap}", flush=True)
+        else:
+            print(f"[SPMD probe @ {label}] no collective counters yet", flush=True)
+    else:
+        delta = {n: snap.get(n, 0) - baseline.get(n, 0)
+                 for n in set(snap) | set(baseline)}
+        delta = {n: v for n, v in delta.items() if v != 0}
+        if delta:
+            print(f"[SPMD probe @ {label}] delta over interval: {delta}",
+                  flush=True)
+        else:
+            print(f"[SPMD probe @ {label}] no collective deltas (clean)",
+                  flush=True)
+    return snap
+
+
 def _precompile_step_graph(model, device, log) -> float:
     """Trigger XLA compilation of `model.step()` at startup.
 
@@ -475,14 +515,23 @@ def _benchmark_inference(model, cfg, device, *,
             xm.wait_device_ops()   # still the canonical "block until idle" call
 
     # ── Prefill throughput at multiple sequence lengths ────────────────────
+    # Three warm-up iterations and 20 timed iterations: a single warm-up is
+    # not enough — torch_xla can re-trace on the second call (e.g. donor
+    # flags or sharding annotations differ from compile-time) and capturing
+    # even one cold-compile in a 5-iter window inflates measured latency by
+    # ~20%. The previous 1-warm / 5-iter setup produced non-monotonic TPS
+    # vs L (small L looked faster than mid L because the cold compile cost
+    # was a smaller fraction of the per-iter time). 3-warm / 20-iter gives
+    # measurements that converge to the steady-state cost.
+    n_warmup = 3
+    n_iter = 20
     for L in prefill_lens:
         if L > cfg.seq_len:
             continue
         x = torch.zeros(batch_size, L, dtype=torch.long, device=device)
-        # Warmup (compiles the graph if it's the first time at this shape).
-        _ = model(x); _sync()
-        # Time multiple iters for a stable estimate.
-        n_iter = 5
+        for _ in range(n_warmup):
+            _ = model(x)
+        _sync()
         t0 = time.time()
         for _ in range(n_iter):
             _ = model(x)
@@ -498,8 +547,9 @@ def _benchmark_inference(model, cfg, device, *,
         batch_size=batch_size, dtype=torch.float32, device=device,
     )
     next_token = torch.zeros(batch_size, dtype=torch.long, device=device)
-    # Warmup so the step graph is compiled (or cache-hit if pre-compile ran).
-    _, caches = model.step(next_token, caches); _sync()
+    for _ in range(n_warmup):
+        _, caches = model.step(next_token, caches)
+    _sync()
     t0 = time.time()
     for _ in range(decode_tokens):
         _, caches = model.step(next_token, caches)
@@ -859,6 +909,13 @@ def train(args, rank: int = 0):
         device_ids = _np.arange(num_devices)
         spmd_mesh = xs.Mesh(device_ids, (num_devices,), ("data",))
         log(f"SPMD enabled — mesh ('data',) over {num_devices} XLA devices")
+
+    # SPMD sanity-probe baseline. The matching post-snapshot fires once
+    # after the first 10 training steps and prints any delta in suspicious
+    # collective counters.
+    spmd_probe_baseline = None
+    if getattr(args, "debug_spmd", False) and is_master and HAS_XLA:
+        spmd_probe_baseline = _spmd_counter_probe("pre-training")
 
     # ── wandb: master-only initialisation guard ────────────────────────────
     # Resolve once and cache; everything else just checks `wandb_enabled`.
@@ -1243,6 +1300,14 @@ def train(args, rank: int = 0):
                 ]))
 
                 global_step += 1
+
+                # SPMD probe: fire exactly once after the 10th training step
+                # to capture all collective counters accumulated by the loop.
+                if (spmd_probe_baseline is not None
+                        and global_step == 10):
+                    _spmd_counter_probe("post-step-10",
+                                        baseline=spmd_probe_baseline)
+                    spmd_probe_baseline = None     # ensure single-shot
 
                 # Flush at log interval — one .cpu() across all buffered scalars.
                 if global_step % args.log_interval == 0:
@@ -2108,6 +2173,13 @@ def main():
                         help="Enable SPMD across all available XLA devices "
                              "(single Python process; GSPMD shards the global "
                              "batch). Off = single device.")
+    parser.add_argument("--debug_spmd", action="store_true",
+                        help="Day-0 sanity probe: snapshot XLA collective "
+                             "counters before training and again after step "
+                             "10, print the delta. Expected: per-step "
+                             "AllReduce only (gradient sync); zero AllToAll/"
+                             "Resharding/CollectivePermute. Anything else "
+                             "means an op lost its sharding annotation.")
 
     # ── Resume training from a previous run ─────────────────────────────────
     # Two sources, in priority order: --resume_artifact (master pulls from

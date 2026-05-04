@@ -19,20 +19,16 @@ Two scan variants are provided:
 
     "auto"    — chunked if L > 2*chunk_size, else hillis.
 
-Backward is handled by PyTorch autograd through pure-tensor ops; no custom
-`torch.autograd.Function` is needed. Use `fused_ssm_checkpoint` to recompute
-the scan during backward and save activation memory.
+Backward is handled by PyTorch autograd through pure-tensor ops.
+Activation-memory pressure should be handled at the block level via
+`torch_xla.utils.checkpoint` on `ResidualBlockTPU.forward` (already wired
+in `mamba/mamba_llm_tpu.py`). A scan-level checkpoint wrapper would be
+redundant — the outer block checkpoint already recomputes the scan in
+backward.
 """
 
 import torch
 import torch.nn.functional as F
-
-# Lazy import of the XLA-aware checkpoint helper. Falls back to the upstream
-# checkpoint on CPU/CUDA so this module loads everywhere.
-try:
-    from torch_xla.utils.checkpoint import checkpoint as _checkpoint
-except ImportError:
-    from torch.utils.checkpoint import checkpoint as _checkpoint
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,32 +250,3 @@ def fused_ssm(delta: torch.Tensor,
     y = torch.einsum('bldn,bln->bld', h, C_proj_f) + D_param_f * x_f
 
     return y.to(out_dtype)
-
-
-def fused_ssm_checkpoint(delta: torch.Tensor,
-                         A: torch.Tensor,
-                         B_proj: torch.Tensor,
-                         x: torch.Tensor,
-                         C_proj: torch.Tensor,
-                         D_param: torch.Tensor,
-                         **kwargs) -> torch.Tensor:
-    """Memory-efficient variant of `fused_ssm` — recomputes the scan on backward.
-
-    Use when activation memory of `fused_ssm` is the bottleneck (long L,
-    large B, many stacked Mamba blocks). Saves roughly an order of magnitude
-    in saved-for-backward activations at the cost of one extra forward pass
-    during backward.
-
-    Requires: at least one input AND one output have requires_grad=True
-    """
-    # Lambda wrapper so torch_xla.utils.checkpoint's inspect.ismethod() check
-    # does NOT pick up bound-method semantics and add every model parameter to
-    # the optimization barrier.
-    def _fn(d_, a_, b_, x_, c_, dp_):
-        return fused_ssm(d_, a_, b_, x_, c_, dp_, **kwargs)
-
-    return _checkpoint(
-        _fn,
-        delta, A, B_proj, x, C_proj, D_param,
-        use_reentrant=True,    # mandatory on XLA
-    )

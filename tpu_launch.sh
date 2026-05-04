@@ -40,10 +40,10 @@ launch_one() {
               --zone="$ZONE" "${PROJECT_FLAG[@]}" \
               --format='value(state.state)' 2>/dev/null || echo UNKNOWN)
     case "$state" in
-      ACTIVE) echo "[$QR] $(date -Is) ACTIVE"; break ;;
+      ACTIVE) echo "[$QR] $(date '+%Y-%m-%dT%H:%M:%S%z') ACTIVE"; break ;;
       FAILED|SUSPENDED|CANCELLED)
         echo "[$QR] terminal state $state — giving up" >&2; return 1 ;;
-      *) echo "[$QR] $(date -Is) state=$state, sleeping $POLL_INTERVAL s" ;;
+      *) echo "[$QR] $(date '+%Y-%m-%dT%H:%M:%S%z') state=$state, sleeping $POLL_INTERVAL s" ;;
     esac
     sleep "$POLL_INTERVAL"
   done

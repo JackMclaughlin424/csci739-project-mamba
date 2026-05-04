@@ -18,10 +18,20 @@ TRAIN_CONFIG="${TRAIN_CONFIG:-config_35M.yaml}"
 REPO_URL="${REPO_URL:-https://github.com/JackMclaughlin424/csci739-project-mamba.git}"
 REPO_DIR="${REPO_DIR:-$HOME/csci739-project-mamba}"
 
-# 1. Wait for any in-flight apt/cloud-init, then disable unattended upgrades
-#    so they can't grab the dpkg lock mid-install.
+# 1. Kill and mask unattended-upgrades + apt-daily BEFORE waiting for the lock.
+#    Stopping the timers alone leaves any in-progress unattended-upgrade.service
+#    holding the dpkg lock for many minutes; stopping the service itself plus
+#    masking prevents cloud-init / systemd from restarting it.
+sudo systemctl stop \
+  unattended-upgrades.service apt-daily.service apt-daily-upgrade.service \
+  2>/dev/null || true
+sudo systemctl mask --now \
+  unattended-upgrades.service apt-daily.service apt-daily-upgrade.service \
+  apt-daily.timer apt-daily-upgrade.timer \
+  2>/dev/null || true
+
+# Now wait briefly for any residual dpkg/apt lock holder to exit.
 while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
-sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer || true
 
 # 2. Install OS deps non-interactively.
 export DEBIAN_FRONTEND=noninteractive

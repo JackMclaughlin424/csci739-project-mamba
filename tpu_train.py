@@ -1661,6 +1661,20 @@ def train(args, rank: int = 0):
         if HAS_XLA and is_master:
             print("\n" + met.short_metrics_report())
 
+        # ── SPMD probe fallback ────────────────────────────────────────────
+        # If --debug_spmd was set but training stopped before step 10 (e.g.
+        # very small --max_steps or an early exit), the post-step-10 delta
+        # was never reported. Take the snapshot now so the user sees a
+        # delta line rather than a lone baseline.
+        if (getattr(args, "debug_spmd", False)
+                and is_master and HAS_XLA
+                and spmd_probe_baseline is not None):
+            print(f"[SPMD probe] post-step-10 snapshot did not fire "
+                  f"(global_step={global_step}); reporting end-of-run delta:",
+                  flush=True)
+            _spmd_counter_probe("end-of-training",
+                                baseline=spmd_probe_baseline)
+
     except Exception:
         crashed = True
         raise

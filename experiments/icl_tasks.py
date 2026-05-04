@@ -15,22 +15,25 @@ from typing import Optional
 
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
+from icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
 
-from core.data.task_helpers import get_all_tasks, get_task_by_name
-from core.models.llm_loading import load_model_and_tokenizer
-from core.models.utils.inference import hidden_to_logits
-from core.analysis.utils import logits_top_tokens
+from icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
+from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from icl_task_vectors.core.analysis.utils import logits_top_tokens
 from task_evaluation import calculate_accuracy_on_datasets
+
 
 import random
 from typing import Any, List, Optional, Iterable
 
-from fewshot_data import FewShotDataset
 from transformers import PreTrainedTokenizer
 
 import torch
 import numpy as np
+
+# our imports
+from experiments.mamba_inference import batch_generate, decode_predictions, hidden_to_logits, tokenize_datasets
+from fewshot_data import FewShotDataset
 
 def seed_everything(seed: int):
     random.seed(seed)
@@ -125,30 +128,30 @@ class LinguisticTask():
         )
 
 LINGUISTIC_TASKS = [
-"linguistic_present_simple_gerund": {
+    {"linguistic_present_simple_gerund": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"},
-    },
-    "linguistic_present_simple_past_simple": {
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"}
+    }},
+    {"linguistic_present_simple_past_simple": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"},
-    },
-    "linguistic_present_simple_past_perfect": {
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"}
+    }},
+    {"linguistic_present_simple_past_perfect": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"},
-    },
-    "linguistic_singular_plural": {
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"}
+    }},
+    {"linguistic_singular_plural": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"},
-    },
-    "linguistic_plural_singular": {
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"}
+    }},
+    {"linguistic_plural_singular": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"},
-    },
-    "linguistic_antonyms": {
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"}
+    }},
+    {"linguistic_antonyms": {
         "task_type": "mapping",
-        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"},
-    }
+        "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"}
+    }}
 ]
 
 def get_results_file_path(model_type: str, model_variant: str, experiment_id: str = "") -> str:
@@ -235,7 +238,7 @@ def run_main_experiment(
     else:
         results = {}
 
-    limit_gpus(range(0, 8))
+    # limit_gpus(range(0, 8))
 
     print("Loading model and tokenizer...")
     if model is None or tokenizer is None:

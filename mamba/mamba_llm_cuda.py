@@ -86,7 +86,6 @@ class MambaLMHeadModel(nn.Module):
         x = self.norm_f(x)
         return self.lm_head(x)
 
-    @torch.inference_mode()
     def allocate_inference_cache(self, batch_size: int,
                                  dtype: torch.dtype = torch.float32,
                                  device=None):
@@ -95,9 +94,13 @@ class MambaLMHeadModel(nn.Module):
             for layer in self.layers
         ]
 
-    @torch.inference_mode()
     def step(self, input_ids: torch.Tensor, caches):
         """One-token step.
+
+        NOTE: no `@torch.inference_mode()` decorator here — callers wrap
+        their own context. Nesting inference_mode through `torch.compile`
+        confuses Dynamo's autograd-state tracking; cleaner to manage it
+        at the user-facing entry point.
 
         Args:
             input_ids: (B,) int — single next token id

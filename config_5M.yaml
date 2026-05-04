@@ -26,11 +26,11 @@ seq_len:     512       # = transformer n_ctx
 
 # ─── Optimisation ──────────────────────────────────────────────────────────
 batch_size:    128     # per-device; SPMD shards globally as B × num_devices
-lr:            3.0e-4  # Mamba-conventional; larger than SimpleStories
+lr:            5.0e-4  # Mamba-conventional; larger than SimpleStories
                        #   transformer's 1e-4 — Mamba tolerates higher lr
 weight_decay:  0.1
 grad_clip:     2.0     # default 1.0 was clipping > 96% of windows
-warmup_steps:  600     # matches upstream SimpleStories warmup_iters
+warmup_steps:  300     # matches upstream SimpleStories warmup_iters
 max_tokens:    2000000000   # SimpleStories baseline budget (~2 B)
 epochs:        4       # ceiling — max_tokens early-stops first
 

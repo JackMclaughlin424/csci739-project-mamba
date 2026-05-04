@@ -47,32 +47,32 @@ MIN_NUM_EXAMPLES = 70
 
 DATA_DIR = "linguistic_mappings"
 
-LINGUISTIC_TASKS = [
-    {"linguistic_present_simple_gerund": {
+LINGUISTIC_TASKS = {
+    "linguistic_present_simple_gerund": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_gerund"}
-    }},
-    {"linguistic_present_simple_past_simple": {
+    },
+    "linguistic_present_simple_past_simple": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_simple"}
-    }},
-    {"linguistic_present_simple_past_perfect": {
+    },
+    "linguistic_present_simple_past_perfect": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "present_simple_past_perfect"}
-    }},
-    {"linguistic_singular_plural": {
+    },
+    "linguistic_singular_plural": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "singular_plural"}
-    }},
-    {"linguistic_plural_singular": {
+    },
+    "linguistic_plural_singular": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "plural_singular"}
-    }},
-    {"linguistic_antonyms": {
+    },
+    "linguistic_antonyms": {
         "task_type": "mapping",
         "task_kwargs": {"mapping_type": "linguistic", "mapping_name": "antonyms"}
-    }}
-]
+    }
+}
 
 
 

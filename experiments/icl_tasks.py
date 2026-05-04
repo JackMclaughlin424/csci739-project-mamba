@@ -2,15 +2,10 @@
 Adapted from https://github.com/roeehendel/icl_task_vectors
 """
 # This must be first
-from dotenv import load_dotenv
-
-from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
-from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
-from experiments.icl_task_vectors.scripts.experiments.main import get_results_file_path
+# from dotenv import load_dotenv
 
 
-
-load_dotenv(".env")
+# load_dotenv(".env")
 
 import sys
 import os
@@ -22,6 +17,8 @@ from typing import Optional
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
+from experiments.icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from experiments.icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
 from experiments.icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
 

@@ -107,9 +107,12 @@ def load_hf_model(model_name: str, device: str = "cpu"):
     model.to(device)
 
     model.eval()
-    assert model.lm_head.weight.data_ptr() == model.backbone.embeddings.weight.data_ptr()
+    # Verify embedding weight tying only for Mamba-style models that use backbone.embeddings
+    if hasattr(model, "backbone") and hasattr(model.backbone, "embeddings"):
+        assert model.lm_head.weight.data_ptr() == model.backbone.embeddings.weight.data_ptr()
 
     return model, tokenizer
+
 
 
 def load_ckpt_model(ckpt_path: str, tokenizer_name: str, device: str = "cpu"):

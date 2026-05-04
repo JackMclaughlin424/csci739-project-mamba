@@ -29,3 +29,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=200, temperature=0.8, devi
             next_token = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
     return tokenizer.decode(input_ids[0].tolist())
+
+
+def load_from_ckpt(ckpt_path):
+    

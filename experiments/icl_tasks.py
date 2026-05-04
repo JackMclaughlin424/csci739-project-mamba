@@ -17,12 +17,12 @@ from typing import Optional
 
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
+from experiments.icl_task_vectors.scripts.utils import MAIN_RESULTS_DIR, main_experiment_results_dir
 
-from icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
-from icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
-from icl_task_vectors.core.analysis.utils import logits_top_tokens
-from icl_task_vectors.core.data.tasks.mapping_task import filter_single_token_outputs
+from experiments.icl_task_vectors.core.data.task_helpers import get_all_tasks, get_task_by_name
+from experiments.icl_task_vectors.core.models.llm_loading import load_model_and_tokenizer
+from experiments.icl_task_vectors.core.analysis.utils import logits_top_tokens
+from experiments.icl_task_vectors.core.data.tasks.mapping_task import filter_single_token_outputs
 from task_evaluation import calculate_accuracy_on_datasets
 
 

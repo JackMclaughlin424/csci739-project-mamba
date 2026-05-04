@@ -107,6 +107,8 @@ def load_hf_model(model_name: str, device: str = "cpu"):
     model.to(device)
 
     model.eval()
+    assert model.lm_head.weight.data_ptr() == model.backbone.embeddings.weight.data_ptr()
+
     return model, tokenizer
 
 

@@ -20,7 +20,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
 from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
-from icl_task_vectors.core.data.task_helpers import get_task_by_name
+from icl_task_vectors.core.data.task_helpers import ALL_TASKS, get_all_tasks, get_task_by_name
 
 import random
 from typing import Any, List, Optional, Iterable
@@ -76,9 +76,9 @@ LINGUISTIC_TASKS = {
 
 
 
-def get_all_tasks(tokenizer: PreTrainedTokenizer):
-    tasks = {task_name: get_task_by_name(tokenizer, task_name) for task_name in LINGUISTIC_TASKS}
-    return tasks
+# def get_all_tasks(tokenizer: PreTrainedTokenizer):
+#     tasks = {task_name: get_task_by_name(tokenizer, task_name) for task_name in LINGUISTIC_TASKS}
+#     return tasks
 
 
 
@@ -150,11 +150,11 @@ def run_main_experiment(
     results_file = f"experiments/results/{model_type}_{model_variant}_results.pkl"
     os.makedirs(os.path.dirname(results_file), exist_ok=True)
 
-    if os.path.exists(results_file):
-        with open(results_file, "rb") as f:
-            results = pickle.load(f)
-    else:
-        results = {}
+    # if os.path.exists(results_file):
+    #     with open(results_file, "rb") as f:
+    #         results = pickle.load(f)
+    # else:
+    results = {}
 
     # limit_gpus(range(0, 8))
 
@@ -163,7 +163,7 @@ def run_main_experiment(
 
     num_examples = 5
 
-    for i, task_name in enumerate(LINGUISTIC_TASKS):
+    for i, task_name in enumerate(ALL_TASKS):
         task = tasks[task_name]
         if task_name in results:
             print(f"Skipping task {i+1}/{len(tasks)}: {task_name}")
@@ -209,7 +209,7 @@ def main():
     parser.add_argument("--tokenizer_name", default="SimpleStories/SimpleStories-5M")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
-
+    print("Device: " + args.device)
     payload = torch.load(args.model_path, map_location="cpu")
     cfg = MambaLMConfig(**payload["config"])
     model = MambaLMHeadModel(cfg)

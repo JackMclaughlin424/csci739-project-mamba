@@ -1719,7 +1719,9 @@ def _save_checkpoint(model, cfg, args, path, extra=None,
     if wandb_enabled and HAS_WANDB and wandb.run is not None:
         try:
             run_id = wandb.run.id
-            artifact_name = f"mamba-5m-{run_id}"
+            n_params = model.num_parameters(unique=True)
+            size_tag = f"{max(1, round(n_params / 1_000_000))}m"
+            artifact_name = f"mamba-{size_tag}-{run_id}"
             metadata = {
                 "path":   path,
                 "config": cfg.__dict__,

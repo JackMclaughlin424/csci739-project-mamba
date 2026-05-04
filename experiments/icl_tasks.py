@@ -76,7 +76,7 @@ LINGUISTIC_TASKS = [
 
 
 
-def get_all_tasks(tokenizer: PreTrainedTokenizer) -> Dict[str, Task]:
+def get_all_tasks(tokenizer: PreTrainedTokenizer):
     tasks = {task_name: get_task_by_name(tokenizer, task_name) for task_name in LINGUISTIC_TASKS}
     return tasks
 

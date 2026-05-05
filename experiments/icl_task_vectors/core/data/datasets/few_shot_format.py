@@ -5,10 +5,10 @@ from typing import Optional, List
 class FewShotFormat:
     def __init__(
         self,
-        example_format: str = "{input} -> {output}",
+        example_format: str = "{input}->{output}",
         example_separator: str = "\n",
         task_description: Optional[str] = None,
-        test_example_format: Optional[str] = "{input} ->",
+        test_example_format: Optional[str] = "{input}->",
     ):
 
 

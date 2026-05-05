@@ -100,10 +100,10 @@ def run_experiments(device: str = None):
                 model_variant=label,
             )
 
-            # Free memory between runs
-            del model
+            del model, tokenizer
             if device == "cuda":
                 torch.cuda.empty_cache()
+
 
 
 if __name__ == "__main__":

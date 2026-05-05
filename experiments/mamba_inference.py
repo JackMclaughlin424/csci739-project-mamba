@@ -62,27 +62,24 @@ def batch_generate(
                 batch_mask = attention_mask[i : i + batch_size].to(device)
                 for j in range(batch_ids.shape[0]):
                     real_ids = batch_ids[j][batch_mask[j].bool()].unsqueeze(0)
-                    # debug: inspect what tokens the model actually receives
-                    # if j == 0:
-                    #     print("Input token IDs:", real_ids[0].tolist())
-                    #     print("Decoded input:", tokenizer.decode(real_ids[0].tolist(), skip_special_tokens=False))
                     raw_output = model(real_ids)
                     logits = _extract_logits(raw_output)
                     next_token = logits[0, -1, :].argmax()
-                    all_new_ids.append(next_token.view(1, 1))
+                    all_new_ids.append(next_token.view(1, 1).cpu())
+                    del real_ids, raw_output, logits, next_token
+                del batch_ids, batch_mask
             else:
                 raw_output = model(batch_ids)
                 logits = _extract_logits(raw_output)
                 next_token = logits[:, -1, :].argmax(dim=-1)
-                all_new_ids.append(next_token.unsqueeze(1))
-
+                all_new_ids.append(next_token.unsqueeze(1).cpu())
+                del batch_ids, raw_output, logits, next_token
 
             if HAS_XLA:
                 xm.mark_step()
 
+    return torch.cat(all_new_ids, dim=0)
 
-    # Single transfer off-device after all batches are done.
-    return torch.cat(all_new_ids, dim=0).cpu()
 
 
 

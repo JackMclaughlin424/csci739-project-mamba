@@ -126,6 +126,8 @@ except ImportError:
     HAS_WANDB = False
     wandb = None  # type: ignore
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
 # Reuse helpers from tpu_train so the test-side numerics are identical to

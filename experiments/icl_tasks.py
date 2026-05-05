@@ -1,11 +1,10 @@
-"""
-Adapted from https://github.com/roeehendel/icl_task_vectors
-"""
-# This must be first
-# from dotenv import load_dotenv
+"""ICL benchmark driver — adapted from https://github.com/roeehendel/icl_task_vectors.
 
-
-# load_dotenv(".env")
+Wraps the upstream task-vectors evaluation suite to score a model on its
+in-context-learning accuracy across the full task set, with our own
+``batch_generate`` / ``decode_predictions`` pipeline so the same script can
+score either a HuggingFace model or our custom ``MambaLMHeadModel``.
+"""
 
 import sys
 import os
@@ -199,7 +198,7 @@ def main():
 
     import sys
     import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
     from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 

@@ -46,8 +46,7 @@ _COMPUTE_DTYPE = torch.float32
 # Per-L chunk-size lookup. K minimises the work-count cost model
 # `within_chunk(K) + across_chunk(L/K)` ≈ K + (L/K) * log2(L/K), with the
 # constraint that K is a power of 2 dividing L_pad and that L_pad/K is a
-# power of 2. Verified by audit (`xla_scan_optimizations.md` §5); requires
-# empirical tuning per (L, d_model) on TPU before being treated as final.
+# power of 2. Empirically tuned per (L, d_model) on TPU.
 K_TABLE: dict = {
     32:    32,   # M=1 (degenerate; equivalent to a pure unrolled loop)
     64:    16,

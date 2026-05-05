@@ -1,6 +1,9 @@
+"""Driver that runs the ICL accuracy sweep across SimpleStories-5M and the
+five Mamba-vs-Pythia checkpoint pairs from the Mamba paper."""
+
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import torch
 from mamba_inference import load_hf_model, load_ckpt_model

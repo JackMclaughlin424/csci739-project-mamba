@@ -1,5 +1,10 @@
-# Credit: Gu and Dao
-# original Mamba repo: https://github.com/state-spaces/mamba.git
+"""HuggingFace Hub helpers for ``MambaLMHeadModel.from_pretrained``.
+
+Vendored from the upstream Mamba repository
+(https://github.com/state-spaces/mamba) so the model can load published
+checkpoints without depending on the full ``mamba_ssm`` package.
+"""
+
 import json
 
 import torch

@@ -11,8 +11,9 @@ Differs from `mamba_llm.py`:
     the CUDA Triton kernel.
   * `MambaBlockTPU.step()` is fully functional — no `[..., -1] = x`
     in-place writes, which trip up XLA's lazy graph.
-  * Optional gradient checkpointing per ResidualBlock with the lambda-
-    wrapper trick from `mamba/xla_tpu_reference.md` §4.3 / §7.4.
+  * Optional gradient checkpointing per ResidualBlock with the FairScale-
+    style lambda-wrapper required to keep BatchNorm-like state safe under
+    XLA recompute.
   * `vocab_size` pads to a multiple of 128 by default (MXU alignment).
 
 Math / shapes are identical to the existing model so checkpoints from
@@ -49,7 +50,8 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_input))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Compute the rsqrt in fp32 then cast back, per xla_tpu_reference §3.5.
+        # rsqrt in fp32, cast back to the input dtype — bf16 rsqrt loses
+        # accuracy at small magnitudes.
         x32 = x.float()
         norm = torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
         return (x32 * norm).to(x.dtype) * self.weight
@@ -212,8 +214,9 @@ class ResidualBlockTPU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training and self.use_checkpoint and x.requires_grad:
-            # Lambda wrapper avoids the inspect.ismethod() barrier explosion
-            # described in xla_tpu_reference.md §4.3.
+            # Lambda wrapper avoids torch_xla.utils.checkpoint's
+            # inspect.ismethod() barrier explosion when checkpointing a
+            # bound method directly.
             def _ckpt_fn(x_):
                 return self.mamba_block(self.norm(x_))
             return _xla_checkpoint(_ckpt_fn, x, use_reentrant=True) + x

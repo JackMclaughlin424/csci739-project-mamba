@@ -40,15 +40,15 @@ Why SPMD over xmp.spawn:
       mark_sharding(batch, mesh, ('data', None)) re-distributes per device
     * Required to scale beyond a single host (TPU pods are SPMD only)
 
-XLA best practices applied (see `mamba/xla_tpu_reference.md`):
-    * MpDeviceLoader (§2.4) — async host→device prefetch
-    * torch_xla.amp.syncfree.AdamW (§9.2) — no internal .item() syncs
-    * xm.optimizer_step (§9.1) — consolidates gradients + implicit mark_step
-    * On-device NaN guard (§9.3) — no per-step .item() on isfinite checks
-    * Diagnostics computed every step, transferred only at log_interval (§9.4)
-    * int32 stored token ids (§8.2) — cast to long only at the embedding
+XLA best practices applied:
+    * MpDeviceLoader for async host→device prefetch
+    * torch_xla.amp.syncfree.AdamW — no internal .item() syncs
+    * xm.optimizer_step — consolidates grads, implicit mark_step
+    * On-device NaN guard — no per-step .item() on isfinite checks
+    * Diagnostics computed every step, transferred only at log_interval
+    * int32 stored token ids (cast to long only at the embedding)
     * GSPMD batch sharding — mark_sharding(batch, mesh, ('data', None))
-      replicates model + shards data dim across all XLA devices
+      replicates the model and shards the data dim across all XLA devices
     * model.step graph pre-compiled at startup so end-of-epoch sample
       generation doesn't pay a cold-compile stall mid-training
 
@@ -57,8 +57,8 @@ Optional environment variables for TPU launches:
     XLA_PERSISTENT_CACHE_PATH=/path/to/cache       # cache compiled programs
     PT_XLA_DEBUG_LEVEL=2                           # surface compile/sync issues
 
-Note: XLA_PERSISTENT_CACHE_PATH has a known load bug on torch_xla 2.9.0
-(xla_tpu_reference §1.5) — programs write but don't reload.
+Note: XLA_PERSISTENT_CACHE_PATH has a known load bug on torch_xla 2.9.0 —
+programs write but don't reload.
 """
 
 import argparse
@@ -146,6 +146,8 @@ except ImportError:
     HAS_WANDB = False
     wandb = None  # type: ignore
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
 
 
@@ -2023,7 +2025,7 @@ def evaluate(model, val_loader, pad_vocab, device,
     # made values num_devices× too small — observed empirically as a 4×
     # bias on TPU v4-4. Trust the per-device estimator; the variance gain
     # from cross-device aggregation is negligible at our sample counts.
-    # SINGLE .cpu() across all three scalars (xla_tpu_reference §2.2).
+    # SINGLE .cpu() across all three scalars — one host transfer instead of three.
     triplet = torch.stack([avg_loss, avg_top1, avg_top5]).cpu().tolist()
     model.train()
     return {"loss": triplet[0], "top1": triplet[1], "top5": triplet[2]}

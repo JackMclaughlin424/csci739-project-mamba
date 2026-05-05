@@ -1,9 +1,15 @@
 """
 Author: Jack McLaughlin
+Reference Mamba LM head model — pure-PyTorch ``MixerModel`` + LM head.
 
-Adapted and Simplified from models/mixer_seq_simple.py in the Mamba github: https://github.com/state-spaces/mamba/tree/main?tab=readme-ov-file
+Adapted and simplified from ``models/mixer_seq_simple.py`` in the upstream
+Mamba repository (https://github.com/state-spaces/mamba). Stacks
+``ResidualBlock``s from :mod:`mamba.mamba_block` into a token-level autoregressive
+language model with weight tying and HuggingFace ``from_pretrained`` support.
 
-Implemented with help from Sonnet 4.6.
+For TPU / XLA training and CUDA / Triton inference see ``mamba_llm_tpu`` and
+``mamba_llm_cuda`` — both expose identical ``state_dict`` keys, so checkpoints
+are interchangeable across the three implementations.
 """
 
 import math
@@ -24,10 +30,18 @@ from .mamba_block import RMSNorm, ResidualBlock
 
 @dataclass
 class MambaLMConfig:
-    d_input: int = 768         # residual stream / embedding dimension
-    d_model: int = 1536        # expanded inner dimension inside MambaBlock (typically 2x d_input)
-    d_state: int = 16          # SSM hidden state dimension
-    dt_rank: int = 0           # rank of delta projection; 0 = auto (ceil(d_input / 16))
+    """Architecture config for ``MambaLMHeadModel``.
+
+    The ``d_input`` / ``d_model`` split is the canonical Mamba notation
+    (residual stream vs. expanded inner stream — usually ``d_model = 2 *
+    d_input``). ``dt_rank = 0`` requests the standard auto value
+    ``ceil(d_input / 16)``.
+    """
+
+    d_input: int = 768          # residual stream / embedding dim
+    d_model: int = 1536         # expanded inner stream inside MambaBlock
+    d_state: int = 16           # SSM hidden-state dim N
+    dt_rank: int = 0            # 0 ⇒ auto = ceil(d_input / 16)
     n_layer: int = 24
     vocab_size: int = 50277
     kernel_size: int = 4
@@ -42,6 +56,7 @@ class MambaLMConfig:
 
 
 def _init_weights(module, n_layer, initializer_range=0.02):
+    """GPT-2 init scheme — embeddings ~ N(0, σ²), residual branches ÷ √n_layer."""
     if isinstance(module, nn.Linear):
         if module.bias is not None:
             nn.init.zeros_(module.bias)
@@ -49,13 +64,22 @@ def _init_weights(module, n_layer, initializer_range=0.02):
         nn.init.normal_(module.weight, std=initializer_range)
     for name, p in module.named_parameters():
         if name in ["output_proj.weight", "fc2.weight"]:
-            # GPT-2 scheme: scale residual branch weights by 1/sqrt(n_layer)
             nn.init.kaiming_uniform_(p, a=math.sqrt(5))
             with torch.no_grad():
                 p /= math.sqrt(n_layer)
 
 
 class MixerModel(nn.Module):
+    """Embedding → ``n_layer`` × ResidualBlock → final RMSNorm.
+
+    ``forward`` has three modes, selected by ``inference_params``:
+
+    * ``inference_params is None`` — parallel training/prefill.
+    * ``inference_params.seqlen_offset == 0`` — prompt prefill via per-token
+      ``step()`` to populate the inference cache.
+    * ``inference_params.seqlen_offset > 0`` — single-token decode step.
+    """
+
     def __init__(self, config: MambaLMConfig) -> None:
         super().__init__()
         self.embedding = nn.Embedding(config.vocab_size, config.d_input)
@@ -101,6 +125,8 @@ class MixerModel(nn.Module):
 
 
 class MambaLMHeadModel(nn.Module, GenerationMixin):
+    """``MixerModel`` + tied LM head; the public model class for inference."""
+
     def __init__(self, config: MambaLMConfig) -> None:
         super().__init__()
         self.config = config

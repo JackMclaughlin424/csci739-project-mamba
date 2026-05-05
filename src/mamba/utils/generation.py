@@ -1,6 +1,14 @@
+"""Sampling / streaming generation utilities used by ``MambaLMHeadModel``.
+
+Vendored from the upstream Mamba repository
+(https://github.com/state-spaces/mamba, © 2023 Albert Gu, Tri Dao). Provides
+``InferenceParams`` (the cache container) and ``GenerationMixin`` (the
+``generate`` method exposed on the LM).
+
 # Copyright (c) 2023, Albert Gu, Tri Dao.
 # Credit: Gu and Dao
-# original Mamba repo: https://github.com/state-spaces/mamba.git
+"""
+
 import gc
 import time
 from collections import namedtuple

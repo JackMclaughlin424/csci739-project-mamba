@@ -1,18 +1,17 @@
-"""Parity tests for `mamba.xla_fused_scan.fused_ssm`.
+"""Parity tests for ``mamba.xla_fused_scan.fused_ssm``.
 
-Oracle: `mamba.fused_scan._fused_ssm_ref`, the pure-PyTorch sequential
+Oracle: ``mamba.fused_scan._fused_ssm_ref``, the pure-PyTorch sequential
 scan that powers the existing CUDA/Triton kernel's reference path.
 
-These tests run on CPU and complete in a few seconds. They are the
-parity gate every later phase of `xla_scan_optimizations.md` must
-continue to pass:
+The tests run on CPU and complete in a few seconds; they are the parity
+gate that every change to the XLA scan must continue to pass:
 
     pytest tests/test_xla_fused_scan.py -v
 
 Tolerances are intentionally loose enough to absorb the legitimate
-differences between the oracle (no clamp on `δ·A`) and `xla_fused_scan`
-(`clamp(arg, -20, 0)`), but tight enough to fail on any algorithmic
-drift. To keep the clamp from firing, all test inputs bound `|A|` away
+differences between the oracle (no clamp on ``δ·A``) and the XLA scan
+(``clamp(arg, -20, 0)``), but tight enough to fail on any algorithmic
+drift. To keep the clamp from firing, all test inputs bound ``|A|`` away
 from large magnitudes.
 """
 

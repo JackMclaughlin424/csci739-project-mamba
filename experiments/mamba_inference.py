@@ -1,3 +1,10 @@
+"""Inference helpers shared by the ICL experiment scripts.
+
+Provides a thin ``batch_generate`` wrapper that supports both HuggingFace
+``CausalLMOutput`` models and the project's ``MambaLMHeadModel`` (which
+returns a raw logits tensor), plus loaders for both checkpoint sources.
+"""
+
 from typing import Dict, List, Optional
 
 import torch
@@ -62,10 +69,6 @@ def batch_generate(
                 batch_mask = attention_mask[i : i + batch_size].to(device)
                 for j in range(batch_ids.shape[0]):
                     real_ids = batch_ids[j][batch_mask[j].bool()].unsqueeze(0)
-                    # debug: inspect what tokens the model actually receives
-                    # if j == 0:
-                    #     print("Input token IDs:", real_ids[0].tolist())
-                    #     print("Decoded input:", tokenizer.decode(real_ids[0].tolist(), skip_special_tokens=False))
                     raw_output = model(real_ids)
                     logits = _extract_logits(raw_output)
                     next_token = logits[0, -1, :].argmax()
@@ -93,7 +96,6 @@ def decode_predictions(
 ) -> List[str]:
     few_shot_format = few_shot_format or FewShotFormat()
     new_tokens = tokenizer.batch_decode(output_ids, skip_special_tokens=False)
-    # print("Raw predicted tokens:", new_tokens[:5])
     answers = [tok.split(few_shot_format.example_separator)[0] for tok in new_tokens]
     return answers
 
@@ -115,7 +117,7 @@ def load_hf_model(model_name: str, device: str = "cpu"):
 def load_ckpt_model(ckpt_path: str, tokenizer_name: str, device: str = "cpu"):
     # Loads a custom MambaLMHeadModel from a .pt checkpoint saved by tpu_train.py
     import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
     from mamba.mamba_llm_tpu import MambaLMHeadModel, MambaLMConfig
     from transformers import AutoTokenizer
 

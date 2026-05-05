@@ -1,13 +1,17 @@
-"""
-eval.py — Evaluate a Mamba checkpoint and optionally compare against a baseline.
+"""Evaluate a trained Mamba checkpoint against a transformer baseline.
+
+Reports cross-entropy loss, perplexity, bits-per-byte, and top-1 / top-5
+accuracy on the SimpleStories test split, with optional side-by-side
+scoring of a HuggingFace baseline (e.g. ``SimpleStories/SimpleStories-5M``).
 
 Usage:
+
     # Mamba only
-    python eval.py --checkpoint mamba_simplestories_5m.pt
+    python scripts/eval.py --checkpoint checkpoints/mamba_simplestories_5m_final.pt
 
     # Side-by-side with the matched transformer
-    python eval.py --checkpoint mamba_simplestories_5m.pt \
-                   --baseline SimpleStories/SimpleStories-5M
+    python scripts/eval.py --checkpoint checkpoints/mamba_simplestories_5m_final.pt \\
+                           --baseline   SimpleStories/SimpleStories-5M
 """
 
 import argparse
@@ -22,7 +26,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 # CUDA setup flags (no-ops on CPU). TF32 doubles fp32 matmul throughput
 # on Ampere+; cudnn.benchmark picks the fastest depthwise-conv algo.
@@ -41,6 +45,11 @@ else:
 # ── Model loading ─────────────────────────────────────────────────────────────
 
 def load_mamba(path, device):
+    """Load a ``.pt`` checkpoint saved by ``scripts/tpu_train.py``.
+
+    Returns ``(model, config, meta)`` where ``meta`` carries ``global_step``,
+    ``epoch``, and the best-val loss / perplexity recorded at save time.
+    """
     payload = torch.load(path, map_location="cpu", weights_only=False)
     cfg     = MambaLMConfig(**payload["config"])
     model   = MambaLMHeadModel(cfg)
@@ -51,6 +60,7 @@ def load_mamba(path, device):
 
 
 def load_transformer(name, device):
+    """Load a HuggingFace causal-LM baseline (e.g. ``SimpleStories/SimpleStories-5M``)."""
     model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32).to(device).eval()
     return model
 
@@ -58,6 +68,11 @@ def load_transformer(name, device):
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def build_test_data(dataset, split, tokenizer, seq_len, max_stories, lowercase):
+    """Tokenise ``dataset[split]`` and pack into ``(N, seq_len + 1)`` chunks.
+
+    The +1 lets ``evaluate`` form ``(x, y)`` next-token pairs without an
+    explicit shift-and-pad step.
+    """
     ds = load_dataset(dataset, split=split)
     text_col = next((c for c in ("story", "text") if c in ds.column_names), ds.column_names[0])
     if max_stories:
@@ -80,8 +95,12 @@ def build_test_data(dataset, split, tokenizer, seq_len, max_stories, lowercase):
 
 @torch.inference_mode()
 def evaluate(model, data, batch_size, device):
-    # Defensive eval mode + on-device metric accumulation. Single host
-    # transfer at the end instead of three .item() syncs per batch.
+    """Score ``model`` on packed ``data``: cross-entropy, perplexity, top-1 / top-5.
+
+    Metrics are accumulated on-device and pulled back to the host in a
+    single transfer at the end (cheaper than three ``.item()`` syncs per
+    batch).
+    """
     model.eval()
     loader = DataLoader(data, batch_size=batch_size, shuffle=False)
     sum_loss = torch.zeros(1, device=device, dtype=torch.float64)

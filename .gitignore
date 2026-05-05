@@ -1,22 +1,15 @@
 .vscode/settings.json
 .claude/
-__pycache__
 .env
-mamba/xla_tpu_reference.md
-wb.py
-.gitignore
-wandb_history_smoke.json
-stories_lm.ipynb
-shakespeare.txt
-shakespeare_lm_run.ipynb
-mamba_block_tests.ipynb
-kernel_benchmark.ipynb
-_analyze_wandb.py
-.gitignore
-_gen_shakespeare_nb.py
-_gen_bench_nb.py
-metrics.md
-
 launch.json
+
+# Caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Local-only artifacts
+checkpoints/
 *.pt
 *.pkl

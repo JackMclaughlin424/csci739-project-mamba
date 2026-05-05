@@ -107,11 +107,11 @@ def load_hf_model(model_name: str, device: str = "cpu"):
 
     if getattr(model.config, "tie_word_embeddings", True):
         model.tie_weights()
-    model.eval()
-    # Verify embedding weight tying only for Mamba-style models that use backbone.embeddings
-    if hasattr(model, "backbone") and hasattr(model.backbone, "embeddings"):
-        assert model.lm_head.weight.data_ptr() == model.backbone.embeddings.weight.data_ptr()
 
+    if hasattr(model, "backbone") and hasattr(model.backbone, "embeddings"):
+        model.lm_head.weight = model.backbone.embeddings.weight
+
+    model.eval()
     return model, tokenizer
 
 

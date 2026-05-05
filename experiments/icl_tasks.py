@@ -17,7 +17,8 @@ from typing import Optional
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
-from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets
+from icl_task_vectors.core.analysis.evaluation import calculate_accuracy_on_datasets, calculate_confusion_matrix_on_datasets
+
 from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 
 from icl_task_vectors.core.data.task_helpers import ALL_TASKS, get_all_tasks, get_task_by_name
@@ -100,44 +101,32 @@ def run_icl(
 def evaluate_task(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, task_name: str, num_examples: int) -> None:
     seed_everything(41)
     accuracies = {}
+    confusion_matrices = {}
+    timings = {}
 
     task = get_task_by_name(tokenizer=tokenizer, task_name=task_name)
 
     # Evaluate baseline
     baseline_datasets = task.create_datasets(num_datasets=100, num_examples=0)
+    tic = time.time()
     predictions = run_icl(model, tokenizer, baseline_datasets, include_train=False)
+    timings["baseline"] = time.time() - tic
     accuracies["baseline"] = calculate_accuracy_on_datasets(task, predictions, baseline_datasets)
+    confusion_matrices["baseline"] = calculate_confusion_matrix_on_datasets(task, predictions, baseline_datasets)
 
-    # Evaluate ICL 
-
-    # num_test_datasets, num_dev_datasets = 400, 100
+    # Evaluate ICL
     num_test_datasets, num_dev_datasets = 50, 50
     test_datasets = task.create_datasets(num_datasets=num_test_datasets, num_examples=num_examples)
+    tic = time.time()
     icl_predictions = run_icl(model, tokenizer, test_datasets)
-    
+    timings["icl"] = time.time() - tic
+
     accuracies["icl"] = calculate_accuracy_on_datasets(task, icl_predictions, test_datasets)
-    
-    # dev_datasets = task.create_datasets(num_datasets=num_dev_datasets, num_examples=num_examples)
-    # tv_predictions, tv_dev_accuracy_by_layer, task_hiddens = run_task_vector(
-    #     model,
-    #     tokenizer,
-    #     task,
-    #     test_datasets,
-    #     dev_datasets,
-    # )
-    # accuracies["tv_dev_by_layer"] = tv_dev_accuracy_by_layer
-    # accuracies["tv"] = calculate_accuracy_on_datasets(task, tv_predictions, test_datasets)
+    confusion_matrices["icl"] = calculate_confusion_matrix_on_datasets(task, icl_predictions, test_datasets)
 
-    # tv_ordered_tokens_by_layer = {}
-    # try:
-    #     for layer_num in tv_dev_accuracy_by_layer.keys():
-    #         task_hidden = task_hiddens.mean(axis=0)[layer_num]
-    #         logits = hidden_to_logits(model, task_hidden)
-    #         tv_ordered_tokens_by_layer[layer_num] = logits_top_tokens(logits, tokenizer, k=100)
-    # except Exception as e:
-    #     print("Error:", e)
+    return accuracies, confusion_matrices, timings
 
-    return accuracies       #, tv_ordered_tokens_by_layer
+
 
 
 def run_main_experiment(
@@ -174,20 +163,22 @@ def run_main_experiment(
         print(f"Running task {i+1}/{len(tasks)}: {task_name}")
 
         tic = time.time()
-        accuracies = evaluate_task(model, tokenizer, task_name, num_examples)
+        accuracies, confusion_matrices, timings = evaluate_task(model, tokenizer, task_name, num_examples)
 
-        print(f"Baseline Accuracy: {accuracies['baseline']:.2f}")
-        print(f"ICL Accuracy: {accuracies['icl']:.2f}")
-        print("Time:", time.time() - tic)
+        print(f"Baseline Accuracy: {accuracies['baseline']:.2f}  ({timings['baseline']:.1f}s)")
+        print(f"ICL Accuracy: {accuracies['icl']:.2f}  ({timings['icl']:.1f}s)")
 
         results[task_name] = {
             "baseline_accuracy": accuracies["baseline"],
+            "baseline_confusion_matrix": confusion_matrices["baseline"],
+            "baseline_time": timings["baseline"],
             "num_examples": num_examples,
             "icl_accuracy": accuracies["icl"],
-            # "tv_accuracy": accuracies["tv"],
-            # "tv_dev_accruacy_by_layer": accuracies["tv_dev_by_layer"],
-            # "tv_ordered_tokens_by_layer": tv_ordered_tokens_by_layer,
+            "icl_confusion_matrix": confusion_matrices["icl"],
+            "icl_time": timings["icl"],
         }
+
+
 
         with open(results_file, "wb") as f:
             pickle.dump(results, f)

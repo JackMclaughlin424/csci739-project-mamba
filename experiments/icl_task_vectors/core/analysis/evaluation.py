@@ -1,6 +1,7 @@
-from typing import List
+from typing import Dict, List
 
 import numpy as np
+from sklearn.metrics import confusion_matrix as sk_confusion_matrix
 
 from icl_task_vectors.core.data.datasets.few_shot_dataset import FewShotDataset
 from icl_task_vectors.core.data.tasks.task import Task
@@ -15,6 +16,20 @@ def calculate_accuracy(task: Task, predictions: List[str], expected_outputs: Lis
 def calculate_accuracy_on_datasets(task: Task, predictions: List[str], datasets: List[FewShotDataset]) -> List[bool]:
     expected_outputs = [dataset.test_output for dataset in datasets]
     return calculate_accuracy(task, predictions, expected_outputs)
+
+def calculate_confusion_matrix_on_datasets(task: Task, predictions: List[str], datasets: List[FewShotDataset]) -> Dict:
+    expected_outputs = [dataset.test_output for dataset in datasets]
+    return _calculate_confusion_matrix(task, predictions, expected_outputs)
+
+
+def _calculate_confusion_matrix(task: Task, predictions: List[str], expected_outputs: List[str]) -> Dict:
+    predictions = _strip_whitespace(predictions)
+    expected_outputs = _strip_whitespace(expected_outputs)
+
+    labels = sorted(set(expected_outputs) | set(predictions))
+    matrix = sk_confusion_matrix(expected_outputs, predictions, labels=labels)
+
+    return {"matrix": matrix, "labels": labels}
 
 
 def print_evaluation_summary(task: Task, predictions: List[str], datasets: List[FewShotDataset]) -> None:

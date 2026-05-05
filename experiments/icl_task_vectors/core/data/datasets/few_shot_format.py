@@ -5,14 +5,13 @@ from typing import Optional, List
 class FewShotFormat:
     def __init__(
         self,
-        example_format: str = "example:{input} : {output}",
-
-        # example_format: str = "input:{input}, output:{output}",
+        example_format: str = "{input} -> {output}",
         example_separator: str = "\n",
         task_description: Optional[str] = None,
-        test_example_format: Optional[str] = "example:{input} :",
-        # test_example_format: Optional[str] = "input:{input}, output:",
+        test_example_format: Optional[str] = "{input} ->",
     ):
+
+
         self.example_format = example_format
         self.example_separator = example_separator
         self.task_description = task_description

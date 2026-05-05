@@ -13,6 +13,7 @@ import pickle
 import time
 import json
 from typing import Optional
+import gc
 
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
@@ -166,7 +167,9 @@ def run_main_experiment(
         accuracies, confusion_matrices, timings = evaluate_task(model, tokenizer, task_name, num_examples)
 
         if torch.cuda.is_available():
+            gc.collect()
             torch.cuda.empty_cache()
+
 
         print(f"Baseline Accuracy: {accuracies['baseline']:.2f}  ({timings['baseline']:.1f}s)")
         print(f"ICL Accuracy: {accuracies['icl']:.2f}  ({timings['icl']:.1f}s)")

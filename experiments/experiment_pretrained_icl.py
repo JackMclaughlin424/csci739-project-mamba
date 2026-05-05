@@ -1,5 +1,7 @@
 import sys
 import os
+import gc
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
@@ -101,8 +103,10 @@ def run_experiments(device: str = None):
             )
 
             del model, tokenizer
+            gc.collect()
             if device == "cuda":
                 torch.cuda.empty_cache()
+
 
 
 

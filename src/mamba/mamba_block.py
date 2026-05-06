@@ -1,15 +1,21 @@
 """Reference Mamba block — selective state-space model + depthwise conv + gating.
 
-Implements the canonical Mamba layer (Gu & Dao, 2023, https://arxiv.org/abs/2312.00752)
-in plain PyTorch. ``MambaBlock`` exposes both a parallel ``forward`` (for training
-and prefill) and an O(1) recurrent ``step`` (for autoregressive decode).
-``ResidualBlock`` wraps a block with RMSNorm + residual connection so it can be
-stacked into the LM in :mod:`mamba.mamba_llm`.
+Implements the canonical Mamba layer in plain PyTorch. ``MambaBlock`` exposes
+both a parallel ``forward`` (for training and prefill) and an O(1) recurrent
+``step`` (for autoregressive decode). ``ResidualBlock`` wraps a block with
+RMSNorm + residual connection so it can be stacked into the LM in
+:mod:`mamba.mamba_llm`.
 
 The TPU/XLA and CUDA/Triton variants in :mod:`mamba.mamba_llm_tpu` and
 :mod:`mamba.mamba_llm_cuda` keep the same parameter shapes and ``state_dict``
 keys as this reference implementation, so the same checkpoint loads into any
 of them with ``strict=True``.
+
+Sources:
+- https://arxiv.org/abs/2312.00752     (Mamba: Selective SSMs, Gu & Dao 2023)
+- https://www.ibm.com/think/topics/mamba-model
+- https://arxiv.org/pdf/2111.00396     (S4)
+- https://arxiv.org/pdf/2008.07669     (HiPPO)
 """
 
 import torch

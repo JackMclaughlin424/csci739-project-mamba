@@ -10,6 +10,8 @@ language model with weight tying and HuggingFace ``from_pretrained`` support.
 For TPU / XLA training and CUDA / Triton inference see ``mamba_llm_tpu`` and
 ``mamba_llm_cuda`` — both expose identical ``state_dict`` keys, so checkpoints
 are interchangeable across the three implementations.
+
+Implemented with help from Sonnet 4.6.
 """
 
 import math

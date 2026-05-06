@@ -11,8 +11,13 @@ Two kernels back the public :func:`fused_ssm` autograd function:
 Compared to the un-fused reference scan this avoids ~4 GB of backward
 intermediates at the configurations we train.
 
-Inspired by Sasha Rush's *Mamba: The Hard Way*
-(https://srush.github.io/annotated-mamba/hard.html).
+Sources:
+- Based on Sasha Rush's *Mamba: The Hard Way*
+  (https://srush.github.io/annotated-mamba/hard.html,
+   https://github.com/srush/annotated-mamba).
+
+Generative AI was used in the implementation of this file to help correct
+the original implementation, optimise performance, and document the code.
 """
 
 import torch

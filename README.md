@@ -162,7 +162,10 @@ The full evaluation pipeline that produced
 
 Generative AI assistants were used while preparing this project for
 boilerplate code, debugging help, kernel-level performance work in
-`fused_scan.py` and `xla_fused_scan.py`, and editorial revision of source
-comments and documentation. All design decisions, experiments, results, and
-final wording were reviewed and verified by the authors.
+`fused_scan.py` and `xla_fused_scan.py`, evaluation framework implementations, 
+and editorial revision of source comments and documentation. All design decisions, 
+experiments, results, and final wording were reviewed and verified by the authors.
 
+Models Used:
+Claude Sonnet
+Claude Opus 

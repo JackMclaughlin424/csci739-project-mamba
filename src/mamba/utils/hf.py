@@ -3,6 +3,7 @@
 Vendored from the upstream Mamba repository
 (https://github.com/state-spaces/mamba) so the model can load published
 checkpoints without depending on the full ``mamba_ssm`` package.
+# Credit: Gu and Dao
 """
 
 import json
